@@ -17,7 +17,7 @@ export interface ProjectCredentials {
 export interface PerformanceData {
   summary: Array<{ metric: string; avgValue: number; p75: number; p95: number; samples: number }>;
   trend: Array<{ bucket: string; metric: string; value: number }>;
-  recent: Array<{ event_time: string; page_url: string; release: string; metric: string; value: number }>;
+  recent: Array<{ event_time: string; page_url: string; release: string; environment: string; metric: string; value: number }>;
 }
 
 export interface ApiData {
@@ -61,6 +61,7 @@ export interface IssueEvent {
   session_id?: string;
   user_id?: string;
   release?: string;
+  environment?: string;
   page_url?: string;
   payload: string;
 }
@@ -145,21 +146,47 @@ export const monitorApi = {
     request<ProjectCredentials>(`/monitor/admin/projects/${encodeURIComponent(projectKey)}/rotate-keys`, {
       method: 'POST'
     }),
-  dashboard: (projectKey: string, hours = 24) =>
-    request<DashboardData>(projectUrl(projectKey, `/dashboard?hours=${hours}`)),
-  issues: (projectKey: string, pageNum = 1, pageSize = 20, status = '') =>
-    request<PageResult<MonitorIssue>>(projectUrl(projectKey,
-      `/issues?pageNum=${pageNum}&pageSize=${pageSize}&status=${encodeURIComponent(status)}`)),
+  dashboard: (projectKey: string, hours = 24, environment = '', release = '') => {
+    const query = new URLSearchParams({ hours: String(hours) });
+    if (environment) query.set('environment', environment);
+    if (release) query.set('release', release);
+    return request<DashboardData>(projectUrl(projectKey, `/dashboard?${query}`));
+  },
+  issues: (
+    projectKey: string,
+    pageNum = 1,
+    pageSize = 20,
+    status = '',
+    hours = 720,
+    release = ''
+  ) => {
+    const query = new URLSearchParams({
+      pageNum: String(pageNum),
+      pageSize: String(pageSize),
+      status,
+      hours: String(hours)
+    });
+    if (release) query.set('release', release);
+    return request<PageResult<MonitorIssue>>(projectUrl(projectKey, `/issues?${query}`));
+  },
   issue: (projectKey: string, id: string | number) =>
     request<IssueDetail>(projectUrl(projectKey, `/issues/${id}`)),
   updateIssueStatus: (projectKey: string, id: string | number, status: 'unresolved' | 'resolved' | 'ignored') =>
     request<MonitorIssue>(projectUrl(projectKey, `/issues/${id}/status?status=${status}`), {
       method: 'PATCH'
     }),
-  performance: (projectKey: string, hours = 24) =>
-    request<PerformanceData>(projectUrl(projectKey, `/performance?hours=${hours}`)),
-  apis: (projectKey: string, hours = 24) =>
-    request<ApiData>(projectUrl(projectKey, `/apis?hours=${hours}`)),
+  performance: (projectKey: string, hours = 24, environment = '', release = '') => {
+    const query = new URLSearchParams({ hours: String(hours) });
+    if (environment) query.set('environment', environment);
+    if (release) query.set('release', release);
+    return request<PerformanceData>(projectUrl(projectKey, `/performance?${query}`));
+  },
+  apis: (projectKey: string, hours = 24, environment = '', release = '') => {
+    const query = new URLSearchParams({ hours: String(hours) });
+    if (environment) query.set('environment', environment);
+    if (release) query.set('release', release);
+    return request<ApiData>(projectUrl(projectKey, `/apis?${query}`));
+  },
   releases: (projectKey: string) =>
     request<MonitorRelease[]>(projectUrl(projectKey, '/releases')),
   replays: (projectKey: string, sessionId = '') =>
