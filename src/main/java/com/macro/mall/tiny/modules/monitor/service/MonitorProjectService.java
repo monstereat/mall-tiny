@@ -25,13 +25,14 @@ public class MonitorProjectService {
     private final StringRedisTemplate redisTemplate;
 
     public MonitorProject validateIngestKey(String projectKey, String rawIngestKey) {
-        if (!StringUtils.hasText(rawIngestKey)) {
-            throw new ResponseStatusException(HttpStatus.UNAUTHORIZED, "missing monitor ingest key");
-        }
-        MonitorProject project = getActiveProject(projectKey);
-        if (project == null || !constantTimeEquals(project.getIngestKeyHash(), sha256(rawIngestKey))) {
-            throw new ResponseStatusException(HttpStatus.UNAUTHORIZED, "invalid monitor project or ingest key");
-        }
+        MonitorProject project = requireActiveProject(projectKey);
+        validateKey(rawIngestKey, project.getIngestKeyHash(), "ingest");
+        return project;
+    }
+
+    public MonitorProject validateReleaseKey(String projectKey, String rawReleaseKey) {
+        MonitorProject project = requireActiveProject(projectKey);
+        validateKey(rawReleaseKey, project.getReleaseKeyHash(), "release");
         return project;
     }
 
@@ -39,12 +40,13 @@ public class MonitorProjectService {
         String cacheKey = cacheKey(projectKey);
         String cached = redisTemplate.opsForValue().get(cacheKey);
         if (StringUtils.hasText(cached)) {
-            String[] parts = cached.split("\\|", 2);
-            if (parts.length == 2) {
+            String[] parts = cached.split("\\|", 3);
+            if (parts.length >= 2) {
                 MonitorProject project = new MonitorProject();
                 project.setId(Long.parseLong(parts[0]));
                 project.setProjectKey(projectKey);
                 project.setIngestKeyHash(parts[1]);
+                project.setReleaseKeyHash(parts.length == 3 ? parts[2] : "");
                 project.setStatus(1);
                 return project;
             }
@@ -59,7 +61,7 @@ public class MonitorProjectService {
         if (project != null) {
             redisTemplate.opsForValue().set(
                     cacheKey,
-                    project.getId() + "|" + project.getIngestKeyHash(),
+                    project.getId() + "|" + nullToEmpty(project.getIngestKeyHash()) + "|" + nullToEmpty(project.getReleaseKeyHash()),
                     CACHE_TTL
             );
         }
@@ -70,8 +72,29 @@ public class MonitorProjectService {
         redisTemplate.delete(cacheKey(projectKey));
     }
 
+    private MonitorProject requireActiveProject(String projectKey) {
+        MonitorProject project = getActiveProject(projectKey);
+        if (project == null) {
+            throw new ResponseStatusException(HttpStatus.UNAUTHORIZED, "monitor project is disabled or missing");
+        }
+        return project;
+    }
+
+    private void validateKey(String rawKey, String expectedHash, String keyType) {
+        if (!StringUtils.hasText(rawKey)) {
+            throw new ResponseStatusException(HttpStatus.UNAUTHORIZED, "missing monitor " + keyType + " key");
+        }
+        if (!constantTimeEquals(expectedHash, sha256(rawKey))) {
+            throw new ResponseStatusException(HttpStatus.UNAUTHORIZED, "invalid monitor " + keyType + " key");
+        }
+    }
+
     private String cacheKey(String projectKey) {
         return "monitor:project:auth:" + projectKey;
+    }
+
+    private String nullToEmpty(String value) {
+        return value == null ? "" : value;
     }
 
     private boolean constantTimeEquals(String left, String right) {
