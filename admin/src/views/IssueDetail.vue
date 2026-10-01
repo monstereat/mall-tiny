@@ -32,6 +32,16 @@ async function load() {
   }
 }
 
+async function updateStatus(status: 'unresolved' | 'resolved' | 'ignored') {
+  if (!projects.currentKey || !detail.value?.issue) return;
+  try {
+    detail.value.issue = await monitorApi.updateIssueStatus(projects.currentKey, detail.value.issue.id, status);
+    ElMessage.success('Issue 状态已更新');
+  } catch (e) {
+    ElMessage.error(e instanceof Error ? e.message : '状态更新失败');
+  }
+}
+
 async function resolveSource() {
   if (!projects.currentKey || !latest.value) return;
   const data = errorData.value;
@@ -61,7 +71,14 @@ watch([() => projects.currentKey, () => route.params.id], load, { immediate: tru
   <section v-loading="loading">
     <el-page-header content="Issue Detail" @back="$router.push('/issues')" />
     <div v-if="detail?.issue" class="panel" style="margin-top:18px">
-      <h2>{{ detail.issue.title }}</h2>
+      <div class="toolbar">
+        <h2 style="margin:0">{{ detail.issue.title }}</h2>
+        <div>
+          <el-button @click="updateStatus('unresolved')">重新打开</el-button>
+          <el-button type="success" @click="updateStatus('resolved')">已解决</el-button>
+          <el-button type="warning" @click="updateStatus('ignored')">忽略</el-button>
+        </div>
+      </div>
       <el-descriptions :column="3" border>
         <el-descriptions-item label="次数">{{ detail.issue.eventCount }}</el-descriptions-item>
         <el-descriptions-item label="影响用户">{{ detail.issue.affectedUsers }}</el-descriptions-item>

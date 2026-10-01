@@ -12,6 +12,9 @@ const router = createRouter({
       children: [
         { path: '', redirect: '/dashboard' },
         { path: 'dashboard', component: () => import('../views/Dashboard.vue') },
+        { path: 'projects', component: () => import('../views/Projects.vue') },
+        { path: 'performance', component: () => import('../views/Performance.vue') },
+        { path: 'apis', component: () => import('../views/Apis.vue') },
         { path: 'issues', component: () => import('../views/Issues.vue') },
         { path: 'issues/:id', component: () => import('../views/IssueDetail.vue') },
         { path: 'releases', component: () => import('../views/Releases.vue') },

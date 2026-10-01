@@ -24,6 +24,9 @@ function logout() {
       <div class="brand">Observe</div>
       <el-menu router :default-active="$route.path" class="menu">
         <el-menu-item index="/dashboard">Dashboard</el-menu-item>
+        <el-menu-item index="/projects">Projects</el-menu-item>
+        <el-menu-item index="/performance">Performance</el-menu-item>
+        <el-menu-item index="/apis">API</el-menu-item>
         <el-menu-item index="/issues">Issues</el-menu-item>
         <el-menu-item index="/releases">Releases</el-menu-item>
         <el-menu-item index="/replays">Session Replay</el-menu-item>

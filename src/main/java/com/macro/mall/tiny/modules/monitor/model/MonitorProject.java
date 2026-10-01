@@ -4,6 +4,7 @@ import com.baomidou.mybatisplus.annotation.IdType;
 import com.baomidou.mybatisplus.annotation.TableId;
 import com.baomidou.mybatisplus.annotation.TableName;
 import lombok.Data;
+import com.fasterxml.jackson.annotation.JsonIgnore;
 
 import java.io.Serializable;
 import java.util.Date;
@@ -17,7 +18,9 @@ public class MonitorProject implements Serializable {
 
     private String name;
     private String projectKey;
+    @JsonIgnore
     private String ingestKeyHash;
+    @JsonIgnore
     private String releaseKeyHash;
     private String platform;
     private Long ownerId;
