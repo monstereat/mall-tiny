@@ -24,15 +24,12 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: '22'
-          cache: 'pnpm'
-          cache-dependency-path: |
-            monitor/sdk/package.json
-            admin/package.json
 
       - name: Enable pnpm
         run: |
           corepack enable
           corepack prepare pnpm@10.17.1 --activate
+          pnpm --version
 
       - name: Build monitoring SDK and demo
         working-directory: monitor/sdk
