@@ -16,27 +16,27 @@ CREATE TABLE IF NOT EXISTS monitor.error_event
     fingerprint String,
     payload String
 )
-ENGINE = MergeTree
+ENGINE = ReplacingMergeTree(received_at)
 PARTITION BY toYYYYMM(event_time)
-ORDER BY (project_id, toDate(event_time), fingerprint, event_time)
+ORDER BY (project_id, event_id, event_time)
 TTL event_time + INTERVAL 90 DAY DELETE;
 
 CREATE TABLE IF NOT EXISTS monitor.performance_event AS monitor.error_event
-ENGINE = MergeTree
+ENGINE = ReplacingMergeTree(received_at)
 PARTITION BY toYYYYMM(event_time)
-ORDER BY (project_id, toDate(event_time), event_time)
+ORDER BY (project_id, event_id, event_time)
 TTL event_time + INTERVAL 90 DAY DELETE;
 
 CREATE TABLE IF NOT EXISTS monitor.behavior_event AS monitor.error_event
-ENGINE = MergeTree
+ENGINE = ReplacingMergeTree(received_at)
 PARTITION BY toYYYYMM(event_time)
-ORDER BY (project_id, toDate(event_time), event_time)
+ORDER BY (project_id, event_id, event_time)
 TTL event_time + INTERVAL 30 DAY DELETE;
 
 CREATE TABLE IF NOT EXISTS monitor.replay_event AS monitor.error_event
-ENGINE = MergeTree
+ENGINE = ReplacingMergeTree(received_at)
 PARTITION BY toYYYYMM(event_time)
-ORDER BY (project_id, toDate(event_time), session_id, event_time)
+ORDER BY (project_id, event_id, event_time)
 TTL event_time + INTERVAL 14 DAY DELETE;
 
 CREATE TABLE IF NOT EXISTS monitor.error_hourly

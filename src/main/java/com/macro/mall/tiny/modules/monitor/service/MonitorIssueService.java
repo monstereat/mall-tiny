@@ -17,20 +17,33 @@ import java.util.Map;
 public class MonitorIssueService {
 
     private static final Duration USER_CARDINALITY_TTL = Duration.ofDays(90);
+    private static final Duration ISSUE_EVENT_DEDUP_TTL = Duration.ofDays(7);
 
     private final MonitorIssueMapper issueMapper;
     private final StringRedisTemplate redisTemplate;
 
     public void aggregate(MonitorProject project, MonitorEventEnvelope event, String fingerprint) {
-        long affectedUsers = updateAffectedUsers(project.getId(), fingerprint, event.getUserId());
-        issueMapper.upsert(
-                project.getId(),
-                fingerprint,
-                resolveTitle(event.getData()),
-                affectedUsers,
-                new Date(event.getTimestamp()),
-                event.getRelease()
-        );
+        String processedKey = "monitor:issue:aggregated:" + event.getEventId();
+        Boolean first = redisTemplate.opsForValue()
+                .setIfAbsent(processedKey, "1", ISSUE_EVENT_DEDUP_TTL);
+        if (!Boolean.TRUE.equals(first)) {
+            return;
+        }
+
+        try {
+            long affectedUsers = updateAffectedUsers(project.getId(), fingerprint, event.getUserId());
+            issueMapper.upsert(
+                    project.getId(),
+                    fingerprint,
+                    resolveTitle(event.getData()),
+                    affectedUsers,
+                    new Date(event.getTimestamp()),
+                    event.getRelease()
+            );
+        } catch (RuntimeException ex) {
+            redisTemplate.delete(processedKey);
+            throw ex;
+        }
     }
 
     private long updateAffectedUsers(Long projectId, String fingerprint, String userId) {

@@ -12,12 +12,21 @@ import lombok.RequiredArgsConstructor;
 import org.springframework.kafka.annotation.KafkaListener;
 import org.springframework.stereotype.Component;
 
+import java.util.ArrayList;
 import java.util.LinkedHashMap;
+import java.util.List;
 import java.util.Map;
 
 @Component
 @RequiredArgsConstructor
 public class MonitorEventConsumer {
+
+    private record PreparedEvent(
+            MonitorEventEnvelope event,
+            MonitorProject project,
+            String fingerprint
+    ) {
+    }
 
     private final ObjectMapper objectMapper;
     private final ClickHouseEventRepository repository;
@@ -29,65 +38,87 @@ public class MonitorEventConsumer {
     private final MonitorAlertEngine alertEngine;
 
     @KafkaListener(topics = "${monitor.kafka.topics.error}")
-    public void consumeError(String payload) {
-        persist(payload, MonitorEventType.ERROR);
+    public void consumeError(List<String> payloads) {
+        persistBatch(payloads, MonitorEventType.ERROR);
     }
 
     @KafkaListener(topics = "${monitor.kafka.topics.performance}")
-    public void consumePerformance(String payload) {
-        persist(payload, MonitorEventType.PERFORMANCE);
+    public void consumePerformance(List<String> payloads) {
+        persistBatch(payloads, MonitorEventType.PERFORMANCE);
     }
 
     @KafkaListener(topics = "${monitor.kafka.topics.behavior}")
-    public void consumeBehavior(String payload) {
-        persist(payload, MonitorEventType.BEHAVIOR);
+    public void consumeBehavior(List<String> payloads) {
+        persistBatch(payloads, MonitorEventType.BEHAVIOR);
     }
 
     @KafkaListener(topics = "${monitor.kafka.topics.replay}")
-    public void consumeReplay(String payload) {
-        persist(payload, MonitorEventType.REPLAY);
+    public void consumeReplay(List<String> payloads) {
+        persistBatch(payloads, MonitorEventType.REPLAY);
     }
 
-    private void persist(String payload, MonitorEventType expectedType) {
-        MonitorEventEnvelope event = parse(payload);
-        if (event.getEventType() != expectedType) {
-            throw new IllegalArgumentException("event type does not match topic: " + expectedType);
-        }
-        if (!deduplicator.reserve(event.getEventId())) {
+    private void persistBatch(List<String> payloads, MonitorEventType expectedType) {
+        if (payloads == null || payloads.isEmpty()) {
             return;
         }
 
+        List<PreparedEvent> prepared = new ArrayList<>();
+        List<String> reservedEventIds = new ArrayList<>();
+
         try {
-            MonitorProject project = projectService.getActiveProject(event.getProjectId());
-            if (project == null) {
-                throw new IllegalArgumentException("monitor project is disabled or missing: " + event.getProjectId());
+            for (String payload : payloads) {
+                MonitorEventEnvelope event = parse(payload);
+                if (event.getEventType() != expectedType) {
+                    throw new IllegalArgumentException("event type does not match topic: " + expectedType);
+                }
+                if (!deduplicator.reserve(event.getEventId())) {
+                    continue;
+                }
+                reservedEventIds.add(event.getEventId());
+
+                MonitorProject project = projectService.getActiveProject(event.getProjectId());
+                if (project == null) {
+                    throw new IllegalArgumentException("monitor project is disabled or missing: " + event.getProjectId());
+                }
+
+                String fingerprint = expectedType == MonitorEventType.ERROR
+                        ? fingerprintService.generate(event)
+                        : "";
+
+                if (expectedType == MonitorEventType.REPLAY) {
+                    MonitorReplay replay = replayService.store(project, event);
+                    Map<String, Object> replayRef = new LinkedHashMap<>();
+                    replayRef.put("replayId", replay.getId());
+                    replayRef.put("eventCount", replay.getEventCount());
+                    replayRef.put("sessionId", replay.getSessionId());
+                    replayRef.put("format", "rrweb");
+                    event.setData(replayRef);
+                }
+
+                prepared.add(new PreparedEvent(event, project, fingerprint));
             }
 
-            String fingerprint = expectedType == MonitorEventType.ERROR
-                    ? fingerprintService.generate(event)
-                    : "";
+            repository.saveBatch(
+                    prepared.stream()
+                            .map(item -> new ClickHouseEventRepository.StoredEvent(
+                                    item.event(),
+                                    item.fingerprint()
+                            ))
+                            .toList()
+            );
 
-            if (expectedType == MonitorEventType.REPLAY) {
-                MonitorReplay replay = replayService.store(project, event);
-                Map<String, Object> replayRef = new LinkedHashMap<>();
-                replayRef.put("replayId", replay.getId());
-                replayRef.put("eventCount", replay.getEventCount());
-                replayRef.put("sessionId", replay.getSessionId());
-                replayRef.put("format", "rrweb");
-                event.setData(replayRef);
-            }
-
-            repository.save(event, fingerprint);
-
-            if (expectedType == MonitorEventType.ERROR) {
-                issueService.aggregate(project, event, fingerprint);
-                alertEngine.evaluate(project, event, fingerprint);
-            } else if (expectedType == MonitorEventType.PERFORMANCE) {
-                alertEngine.evaluate(project, event, "");
+            for (PreparedEvent item : prepared) {
+                if (expectedType == MonitorEventType.ERROR) {
+                    issueService.aggregate(item.project(), item.event(), item.fingerprint());
+                    alertEngine.evaluate(item.project(), item.event(), item.fingerprint());
+                } else if (expectedType == MonitorEventType.PERFORMANCE) {
+                    alertEngine.evaluate(item.project(), item.event(), "");
+                }
             }
         } catch (RuntimeException ex) {
-            // 发生临时故障时释放幂等键，让 Kafka Retry/DLQ 接管。
-            deduplicator.release(event.getEventId());
+            // At-least-once delivery: release batch reservations and allow Kafka retry/DLQ.
+            // ClickHouse uses ReplacingMergeTree(event_id) so raw-event retries are dedupe-friendly.
+            reservedEventIds.forEach(deduplicator::release);
             throw ex;
         }
     }

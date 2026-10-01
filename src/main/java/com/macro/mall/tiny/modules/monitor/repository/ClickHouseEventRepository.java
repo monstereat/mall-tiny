@@ -8,11 +8,19 @@ import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.stereotype.Repository;
 
+import java.sql.PreparedStatement;
+import java.sql.SQLException;
 import java.sql.Timestamp;
 import java.time.Instant;
+import java.util.List;
+import java.util.Map;
+import java.util.stream.Collectors;
 
 @Repository
 public class ClickHouseEventRepository {
+
+    public record StoredEvent(MonitorEventEnvelope event, String fingerprint) {
+    }
 
     private final JdbcTemplate jdbcTemplate;
     private final ObjectMapper objectMapper;
@@ -25,25 +33,47 @@ public class ClickHouseEventRepository {
     }
 
     public void save(MonitorEventEnvelope event, String fingerprint) {
-        String table = resolveTable(event.getEventType());
-        String sql = "INSERT INTO monitor." + table + " " +
-                "(event_id, project_id, event_time, session_id, user_id, release, environment, page_url, sdk_version, trace_id, fingerprint, payload) " +
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)";
-        jdbcTemplate.update(
-                sql,
-                event.getEventId(),
-                event.getProjectId(),
-                Timestamp.from(Instant.ofEpochMilli(event.getTimestamp())),
-                safe(event.getSessionId()),
-                safe(event.getUserId()),
-                safe(event.getRelease()),
-                safe(event.getEnvironment()),
-                safe(event.getPageUrl()),
-                safe(event.getSdkVersion()),
-                safe(event.getTraceId()),
-                safe(fingerprint),
-                toJson(event)
-        );
+        saveBatch(List.of(new StoredEvent(event, fingerprint)));
+    }
+
+    public void saveBatch(List<StoredEvent> rows) {
+        if (rows == null || rows.isEmpty()) {
+            return;
+        }
+
+        Map<MonitorEventType, List<StoredEvent>> grouped = rows.stream()
+                .collect(Collectors.groupingBy(row -> row.event().getEventType()));
+
+        grouped.forEach((type, group) -> {
+            String table = resolveTable(type);
+            String sql = "INSERT INTO monitor." + table + " " +
+                    "(event_id, project_id, event_time, session_id, user_id, release, environment, page_url, sdk_version, trace_id, fingerprint, payload) " +
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)";
+
+            jdbcTemplate.batchUpdate(
+                    sql,
+                    group,
+                    Math.min(500, group.size()),
+                    (ps, row) -> bind(ps, row)
+            );
+        });
+    }
+
+    private void bind(PreparedStatement ps, StoredEvent row) throws SQLException {
+        MonitorEventEnvelope event = row.event();
+        int index = 1;
+        ps.setString(index++, event.getEventId());
+        ps.setString(index++, event.getProjectId());
+        ps.setTimestamp(index++, Timestamp.from(Instant.ofEpochMilli(event.getTimestamp())));
+        ps.setString(index++, safe(event.getSessionId()));
+        ps.setString(index++, safe(event.getUserId()));
+        ps.setString(index++, safe(event.getRelease()));
+        ps.setString(index++, safe(event.getEnvironment()));
+        ps.setString(index++, safe(event.getPageUrl()));
+        ps.setString(index++, safe(event.getSdkVersion()));
+        ps.setString(index++, safe(event.getTraceId()));
+        ps.setString(index++, safe(row.fingerprint()));
+        ps.setString(index, toJson(event));
     }
 
     private String resolveTable(MonitorEventType type) {

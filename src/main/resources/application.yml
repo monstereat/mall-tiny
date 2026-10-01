@@ -18,8 +18,12 @@ spring:
     consumer:
       group-id: monitor-worker-v1
       auto-offset-reset: earliest
+      max-poll-records: ${MONITOR_KAFKA_MAX_POLL_RECORDS:200}
       key-deserializer: org.apache.kafka.common.serialization.StringDeserializer
       value-deserializer: org.apache.kafka.common.serialization.StringDeserializer
+    listener:
+      type: batch
+      ack-mode: batch
 
 mybatis-plus:
   mapper-locations: classpath:/mapper/**/*.xml
