@@ -19,10 +19,6 @@ import java.util.Map;
 import java.util.function.Supplier;
 import java.util.stream.Collectors;
 
-/**
- * 动态鉴权管理器，用于判断是否有资源的访问权限
- * Created by macro on 2023/11/3.
- */
 public class DynamicAuthorizationManager implements AuthorizationManager<RequestAuthorizationContext> {
 
     @Autowired
@@ -36,42 +32,44 @@ public class DynamicAuthorizationManager implements AuthorizationManager<Request
     }
 
     @Override
-    public AuthorizationDecision check(Supplier<Authentication> authentication, RequestAuthorizationContext requestAuthorizationContext) {
+    public AuthorizationDecision check(
+            Supplier<Authentication> authentication,
+            RequestAuthorizationContext requestAuthorizationContext) {
         HttpServletRequest request = requestAuthorizationContext.getRequest();
         String path = request.getRequestURI();
         PathMatcher pathMatcher = new AntPathMatcher();
-        //白名单路径直接放行
-        List<String> ignoreUrls = ignoreUrlsConfig.getUrls();
-        for (String ignoreUrl : ignoreUrls) {
+
+        for (String ignoreUrl : ignoreUrlsConfig.getUrls()) {
             if (pathMatcher.match(ignoreUrl, path)) {
                 return new AuthorizationDecision(true);
             }
         }
-        //对应跨域的预检请求直接放行
-        if(request.getMethod().equals(HttpMethod.OPTIONS.name())){
+        if (request.getMethod().equals(HttpMethod.OPTIONS.name())) {
             return new AuthorizationDecision(true);
         }
-        //权限校验逻辑
+
+        Authentication currentAuth = authentication.get();
+        if (!currentAuth.isAuthenticated()) {
+            return new AuthorizationDecision(false);
+        }
+
         Map<String, String> dataSource = dynamicSecurityService.getDataSource();
         List<String> needAuthorities = dataSource.entrySet().stream()
                 .filter(entry -> pathMatcher.match(entry.getKey(), path))
                 .map(Map.Entry::getValue)
                 .collect(Collectors.toList());
-        Authentication currentAuth = authentication.get();
-        //判定是否已经实现登录认证
-        if(currentAuth.isAuthenticated()){
-            Collection<? extends GrantedAuthority> grantedAuthorities = currentAuth.getAuthorities();
-            List<String> hasAuth = grantedAuthorities.stream()
-                    .map(GrantedAuthority::getAuthority)
-                    .filter(needAuthorities::contains)
-                    .collect(Collectors.toList());
-            if(CollUtil.isNotEmpty(hasAuth)){
-                return new AuthorizationDecision(true);
-            }else{
-                return new AuthorizationDecision(false);
-            }
-        }else{
-            return new AuthorizationDecision(false);
+
+        // 没有显式登记为 RBAC 资源的接口，至少要求已登录。
+        // 监控项目 API 会在业务层继续执行 projectKey 范围校验。
+        if (CollUtil.isEmpty(needAuthorities)) {
+            return new AuthorizationDecision(true);
         }
+
+        Collection<? extends GrantedAuthority> grantedAuthorities = currentAuth.getAuthorities();
+        List<String> hasAuth = grantedAuthorities.stream()
+                .map(GrantedAuthority::getAuthority)
+                .filter(needAuthorities::contains)
+                .collect(Collectors.toList());
+        return new AuthorizationDecision(CollUtil.isNotEmpty(hasAuth));
     }
 }

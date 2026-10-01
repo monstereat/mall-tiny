@@ -6,7 +6,9 @@ import com.macro.mall.tiny.modules.monitor.mapper.MonitorSourceMapMapper;
 import com.macro.mall.tiny.modules.monitor.model.MonitorProject;
 import com.macro.mall.tiny.modules.monitor.model.MonitorRelease;
 import com.macro.mall.tiny.modules.monitor.model.MonitorSourceMap;
-import io.minio.*;
+import io.minio.GetObjectArgs;
+import io.minio.MinioClient;
+import io.minio.PutObjectArgs;
 import lombok.RequiredArgsConstructor;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.http.HttpStatus;
@@ -16,7 +18,6 @@ import org.springframework.web.server.ResponseStatusException;
 
 import java.io.ByteArrayInputStream;
 import java.io.InputStream;
-import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
 import java.util.Optional;
@@ -30,6 +31,7 @@ public class MonitorSourceMapService {
     private final MonitorSourceMapMapper sourceMapMapper;
     private final SourceMapV3Resolver resolver;
     private final MinioClient minioClient;
+    private final MinioBucketService bucketService;
 
     @Value("${monitor.minio.source-map-bucket}")
     private String sourceMapBucket;
@@ -46,7 +48,7 @@ public class MonitorSourceMapService {
 
         try {
             byte[] bytes = file.getBytes();
-            ensureBucket();
+            bucketService.ensureBucket(sourceMapBucket);
             String objectKey = objectKey(projectKey, release, bundleFile);
 
             minioClient.putObject(
@@ -95,6 +97,26 @@ public class MonitorSourceMapService {
             int line,
             int column) {
         MonitorProject project = projectService.validateReleaseKey(projectKey, releaseKey);
+        return resolveInternal(project, version, environment, bundleFile, line, column);
+    }
+
+    public Optional<SourceMapResolvedPosition> resolveForAdmin(
+            MonitorProject project,
+            String version,
+            String environment,
+            String bundleFile,
+            int line,
+            int column) {
+        return resolveInternal(project, version, environment, bundleFile, line, column);
+    }
+
+    private Optional<SourceMapResolvedPosition> resolveInternal(
+            MonitorProject project,
+            String version,
+            String environment,
+            String bundleFile,
+            int line,
+            int column) {
         MonitorRelease release = releaseService.require(project.getId(), version, environment);
         MonitorSourceMap sourceMap = sourceMapMapper.selectOne(
                 Wrappers.<MonitorSourceMap>lambdaQuery()
@@ -114,17 +136,6 @@ public class MonitorSourceMapService {
             return resolver.resolve(input.readAllBytes(), line, column);
         } catch (Exception e) {
             throw new IllegalStateException("source map resolve failed", e);
-        }
-    }
-
-    private void ensureBucket() throws Exception {
-        boolean exists = minioClient.bucketExists(
-                BucketExistsArgs.builder().bucket(sourceMapBucket).build()
-        );
-        if (!exists) {
-            minioClient.makeBucket(
-                    MakeBucketArgs.builder().bucket(sourceMapBucket).build()
-            );
         }
     }
 
