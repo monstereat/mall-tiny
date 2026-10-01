@@ -2,13 +2,15 @@ CREATE TABLE IF NOT EXISTS monitor_project (
   id BIGINT NOT NULL AUTO_INCREMENT,
   name VARCHAR(128) NOT NULL,
   project_key VARCHAR(64) NOT NULL,
+  ingest_key_hash CHAR(64) NOT NULL,
   platform VARCHAR(32) NOT NULL DEFAULT 'web',
   owner_id BIGINT DEFAULT NULL,
   status TINYINT NOT NULL DEFAULT 1,
   create_time DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
   update_time DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
   PRIMARY KEY (id),
-  UNIQUE KEY uk_project_key (project_key)
+  UNIQUE KEY uk_project_key (project_key),
+  UNIQUE KEY uk_ingest_key_hash (ingest_key_hash)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='监控项目';
 
 CREATE TABLE IF NOT EXISTS monitor_release (
@@ -61,3 +63,7 @@ CREATE TABLE IF NOT EXISTS monitor_alert_rule (
   PRIMARY KEY (id),
   KEY idx_project_enabled (project_id, enabled)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='告警规则';
+
+INSERT INTO monitor_project (name, project_key, ingest_key_hash, platform, status)
+VALUES ('Demo Web', 'demo-web', 'eef52729e3d17f2433c7f16c4fb6f0f0f03abffc31b8af6ed4bd55c75ca6a35e', 'web', 1)
+ON DUPLICATE KEY UPDATE name = VALUES(name), status = 1;
