@@ -7,14 +7,41 @@ on:
     branches: [develop-me]
 
 jobs:
-  test:
+  verify:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-java@v4
+
+      - uses: actions/setup-java@v5
         with:
           distribution: temurin
           java-version: '17'
           cache: maven
-      - name: Compile and test
+
+      - name: Java compile and tests
         run: mvn -B test
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: 'pnpm'
+          cache-dependency-path: |
+            monitor/sdk/package.json
+            admin/package.json
+
+      - name: Enable pnpm
+        run: |
+          corepack enable
+          corepack prepare pnpm@10.17.1 --activate
+
+      - name: Build monitoring SDK and demo
+        working-directory: monitor/sdk
+        run: |
+          pnpm install --no-frozen-lockfile
+          pnpm build
+
+      - name: Build admin console
+        working-directory: admin
+        run: |
+          pnpm install --no-frozen-lockfile
+          pnpm build
