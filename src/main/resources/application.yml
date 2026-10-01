@@ -57,6 +57,11 @@ monitor:
     url: ${CLICKHOUSE_JDBC_URL:jdbc:clickhouse://localhost:8123/monitor}
     username: ${CLICKHOUSE_USERNAME:default}
     password: ${CLICKHOUSE_PASSWORD:monitor}
+  minio:
+    endpoint: ${MINIO_ENDPOINT:http://localhost:9002}
+    access-key: ${MINIO_ACCESS_KEY:monitor}
+    secret-key: ${MINIO_SECRET_KEY:monitor123456}
+    source-map-bucket: ${MINIO_SOURCEMAP_BUCKET:monitor-sourcemaps}
 
 secure:
   ignored:

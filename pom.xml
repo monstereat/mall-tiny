@@ -21,6 +21,7 @@
         <mybatis-plus.version>3.5.10.1</mybatis-plus.version>
         <springdoc-openapi.version>2.8.16</springdoc-openapi.version>
         <clickhouse-jdbc.version>0.10.0</clickhouse-jdbc.version>
+        <minio.version>8.6.0</minio.version>
         <velocity.version>2.4</velocity.version>
     </properties>
 
@@ -125,6 +126,12 @@
             <version>${velocity.version}</version>
         </dependency>
 
+        <!-- Object storage for private SourceMap / Replay -->
+        <dependency>
+            <groupId>io.minio</groupId>
+            <artifactId>minio</artifactId>
+            <version>${minio.version}</version>
+        </dependency>
         <!-- Kafka event pipeline -->
         <dependency>
             <groupId>org.springframework.kafka</groupId>
