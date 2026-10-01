@@ -22,7 +22,7 @@ class SourceMapV3ResolverTest {
                   "sources": ["src/app.ts"],
                   "names": [],
                   "mappings": "AAAA;AACA",
-                  "sourcesContent": ["const a = 1;\nthrow new Error('boom');"]
+                  "sourcesContent": ["const a = 1;\\nthrow new Error('boom');"]
                 }
                 """;
 
