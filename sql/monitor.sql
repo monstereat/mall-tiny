@@ -57,7 +57,9 @@ CREATE TABLE IF NOT EXISTS monitor_alert_rule (
   threshold_value DECIMAL(18,4) NOT NULL,
   window_seconds INT NOT NULL DEFAULT 300,
   duration_seconds INT NOT NULL DEFAULT 0,
+  cooldown_seconds INT NOT NULL DEFAULT 900,
   level VARCHAR(16) NOT NULL DEFAULT 'warning',
+  webhook_url VARCHAR(1024) DEFAULT NULL,
   enabled TINYINT NOT NULL DEFAULT 1,
   create_time DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
   update_time DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
@@ -117,6 +119,3 @@ CREATE TABLE IF NOT EXISTS monitor_alert_record (
   KEY idx_rule_status (rule_id, status)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='告警触发记录';
 
-ALTER TABLE monitor_alert_rule
-  ADD COLUMN IF NOT EXISTS cooldown_seconds INT NOT NULL DEFAULT 900 AFTER duration_seconds,
-  ADD COLUMN IF NOT EXISTS webhook_url VARCHAR(1024) DEFAULT NULL AFTER level;

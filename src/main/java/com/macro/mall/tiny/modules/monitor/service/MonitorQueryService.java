@@ -10,6 +10,9 @@ import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.stereotype.Service;
 
+import java.sql.Timestamp;
+import java.time.Instant;
+import java.time.temporal.ChronoUnit;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -52,22 +55,23 @@ public class MonitorQueryService {
 
     public Map<String, Object> dashboard(MonitorProject project, int hours) {
         int safeHours = Math.max(1, Math.min(24 * 30, hours));
+        Timestamp since = Timestamp.from(Instant.now().minus(safeHours, ChronoUnit.HOURS));
         Map<String, Object> result = new LinkedHashMap<>();
 
         Long errors = clickHouse.queryForObject(
-                "SELECT count() FROM monitor.error_event WHERE project_id=? AND event_time >= now() - INTERVAL ? HOUR",
+                "SELECT count() FROM monitor.error_event WHERE project_id=? AND event_time >= ?",
                 Long.class,
-                project.getProjectKey(), safeHours
+                project.getProjectKey(), since
         );
         Long affectedUsers = clickHouse.queryForObject(
-                "SELECT uniqExactIf(user_id, user_id != '') FROM monitor.error_event WHERE project_id=? AND event_time >= now() - INTERVAL ? HOUR",
+                "SELECT uniqExactIf(user_id, user_id != '') FROM monitor.error_event WHERE project_id=? AND event_time >= ?",
                 Long.class,
-                project.getProjectKey(), safeHours
+                project.getProjectKey(), since
         );
         Long apiEvents = clickHouse.queryForObject(
-                "SELECT countIf(JSONExtractString(payload, 'data', 'category')='api') FROM monitor.behavior_event WHERE project_id=? AND event_time >= now() - INTERVAL ? HOUR",
+                "SELECT countIf(JSONExtractString(payload, 'data', 'category')='api') FROM monitor.behavior_event WHERE project_id=? AND event_time >= ?",
                 Long.class,
-                project.getProjectKey(), safeHours
+                project.getProjectKey(), since
         );
         Long unresolved = issueMapper.selectCount(
                 Wrappers.<MonitorIssue>lambdaQuery()
@@ -80,14 +84,14 @@ public class MonitorQueryService {
         result.put("apiEvents", apiEvents == null ? 0L : apiEvents);
         result.put("unresolvedIssues", unresolved == null ? 0L : unresolved);
         result.put("errorTrend", clickHouse.queryForList(
-                "SELECT bucket, sum(event_count) AS count FROM monitor.error_hourly WHERE project_id=? AND bucket >= now() - INTERVAL ? HOUR GROUP BY bucket ORDER BY bucket",
-                project.getProjectKey(), safeHours
+                "SELECT bucket, sum(event_count) AS count FROM monitor.error_hourly WHERE project_id=? AND bucket >= ? GROUP BY bucket ORDER BY bucket",
+                project.getProjectKey(), since
         ));
         result.put("webVitals", clickHouse.queryForList(
                 "SELECT JSONExtractString(payload,'data','metric') AS metric, avg(JSONExtractFloat(payload,'data','value')) AS value " +
-                        "FROM monitor.performance_event WHERE project_id=? AND event_time >= now() - INTERVAL ? HOUR " +
-                        "AND metric IN ('FCP','LCP','CLS','TTFB','INP') GROUP BY metric ORDER BY metric",
-                project.getProjectKey(), safeHours
+                        "FROM monitor.performance_event WHERE project_id=? AND event_time >= ? " +
+                        "AND JSONExtractString(payload,'data','metric') IN ('FCP','LCP','CLS','TTFB','INP') GROUP BY metric ORDER BY metric",
+                project.getProjectKey(), since
         ));
         return result;
     }
