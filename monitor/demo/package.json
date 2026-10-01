@@ -1,0 +1,22 @@
+{
+  "name": "monitor-demo",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "vue-tsc -b && vite build"
+  },
+  "dependencies": {
+    "@observe/browser": "workspace:*",
+    "@observe/replay": "workspace:*",
+    "@observe/vue": "workspace:*",
+    "vue": "^3.5.22"
+  },
+  "devDependencies": {
+    "@vitejs/plugin-vue": "^6.0.1",
+    "typescript": "^5.9.2",
+    "vite": "^7.1.7",
+    "vue-tsc": "^3.0.8"
+  }
+}
