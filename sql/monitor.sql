@@ -81,3 +81,42 @@ CREATE TABLE IF NOT EXISTS monitor_sourcemap (
   UNIQUE KEY uk_release_bundle (release_id, bundle_file),
   KEY idx_project_release (project_id, release_id)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='SourceMap 私有对象索引';
+
+CREATE TABLE IF NOT EXISTS monitor_replay (
+  id BIGINT NOT NULL AUTO_INCREMENT,
+  project_id BIGINT NOT NULL,
+  event_id VARCHAR(128) NOT NULL,
+  session_id VARCHAR(128) NOT NULL,
+  release_version VARCHAR(128) DEFAULT NULL,
+  object_key VARCHAR(1024) NOT NULL,
+  event_count INT NOT NULL DEFAULT 0,
+  start_time DATETIME DEFAULT NULL,
+  end_time DATETIME DEFAULT NULL,
+  create_time DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  PRIMARY KEY (id),
+  UNIQUE KEY uk_replay_event (event_id),
+  KEY idx_project_session (project_id, session_id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='Session Replay 对象索引';
+
+CREATE TABLE IF NOT EXISTS monitor_alert_record (
+  id BIGINT NOT NULL AUTO_INCREMENT,
+  project_id BIGINT NOT NULL,
+  rule_id BIGINT NOT NULL,
+  metric VARCHAR(64) NOT NULL,
+  metric_value DECIMAL(18,4) NOT NULL,
+  threshold_value DECIMAL(18,4) NOT NULL,
+  level VARCHAR(16) NOT NULL,
+  status VARCHAR(16) NOT NULL DEFAULT 'firing',
+  fingerprint VARCHAR(128) DEFAULT NULL,
+  message VARCHAR(512) NOT NULL,
+  triggered_at DATETIME NOT NULL,
+  recovered_at DATETIME DEFAULT NULL,
+  create_time DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  PRIMARY KEY (id),
+  KEY idx_project_triggered (project_id, triggered_at),
+  KEY idx_rule_status (rule_id, status)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='告警触发记录';
+
+ALTER TABLE monitor_alert_rule
+  ADD COLUMN IF NOT EXISTS cooldown_seconds INT NOT NULL DEFAULT 900 AFTER duration_seconds,
+  ADD COLUMN IF NOT EXISTS webhook_url VARCHAR(1024) DEFAULT NULL AFTER level;
