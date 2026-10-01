@@ -5,20 +5,25 @@ import com.baomidou.mybatisplus.core.toolkit.Wrappers;
 import com.baomidou.mybatisplus.extension.plugins.pagination.Page;
 import com.macro.mall.tiny.modules.monitor.mapper.*;
 import com.macro.mall.tiny.modules.monitor.model.*;
-import lombok.RequiredArgsConstructor;
 import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.stereotype.Service;
+import org.springframework.util.StringUtils;
 
 import java.sql.Timestamp;
 import java.time.Instant;
 import java.time.temporal.ChronoUnit;
+import java.util.ArrayList;
+import java.util.Date;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 
 @Service
 public class MonitorQueryService {
+
+    private record EventFilter(String clause, Object[] args) {
+    }
 
     private final JdbcTemplate clickHouse;
     private final MonitorProjectMapper projectMapper;
@@ -53,55 +58,80 @@ public class MonitorQueryService {
         );
     }
 
-    public Map<String, Object> dashboard(MonitorProject project, int hours) {
-        int safeHours = Math.max(1, Math.min(24 * 30, hours));
-        Timestamp since = Timestamp.from(Instant.now().minus(safeHours, ChronoUnit.HOURS));
+    public Map<String, Object> dashboard(
+            MonitorProject project,
+            int hours,
+            String environment,
+            String release) {
+        EventFilter errorFilter = eventFilter(project, hours, environment, release);
+        EventFilter performanceFilter = eventFilter(project, hours, environment, release);
+        EventFilter behaviorFilter = eventFilter(project, hours, environment, release);
         Map<String, Object> result = new LinkedHashMap<>();
 
         Long errors = clickHouse.queryForObject(
-                "SELECT count() FROM monitor.error_event WHERE project_id=? AND event_time >= ?",
+                "SELECT count() FROM monitor.error_event" + errorFilter.clause(),
                 Long.class,
-                project.getProjectKey(), since
+                errorFilter.args()
         );
         Long affectedUsers = clickHouse.queryForObject(
-                "SELECT uniqExactIf(user_id, user_id != '') FROM monitor.error_event WHERE project_id=? AND event_time >= ?",
+                "SELECT uniqExactIf(user_id, user_id != '') FROM monitor.error_event" + errorFilter.clause(),
                 Long.class,
-                project.getProjectKey(), since
+                errorFilter.args()
         );
         Long apiEvents = clickHouse.queryForObject(
-                "SELECT countIf(JSONExtractString(payload, 'data', 'category')='api') FROM monitor.behavior_event WHERE project_id=? AND event_time >= ?",
+                "SELECT countIf(JSONExtractString(payload, 'data', 'category')='api') FROM monitor.behavior_event" +
+                        behaviorFilter.clause(),
                 Long.class,
-                project.getProjectKey(), since
+                behaviorFilter.args()
         );
-        Long unresolved = issueMapper.selectCount(
-                Wrappers.<MonitorIssue>lambdaQuery()
-                        .eq(MonitorIssue::getProjectId, project.getId())
-                        .eq(MonitorIssue::getStatus, "unresolved")
-        );
+
+        var issueQuery = Wrappers.<MonitorIssue>lambdaQuery()
+                .eq(MonitorIssue::getProjectId, project.getId())
+                .eq(MonitorIssue::getStatus, "unresolved");
+        if (StringUtils.hasText(release)) {
+            issueQuery.eq(MonitorIssue::getLatestRelease, release);
+        }
+        Long unresolved = issueMapper.selectCount(issueQuery);
 
         result.put("errorCount", errors == null ? 0L : errors);
         result.put("affectedUsers", affectedUsers == null ? 0L : affectedUsers);
         result.put("apiEvents", apiEvents == null ? 0L : apiEvents);
         result.put("unresolvedIssues", unresolved == null ? 0L : unresolved);
         result.put("errorTrend", clickHouse.queryForList(
-                "SELECT bucket, sum(event_count) AS count FROM monitor.error_hourly WHERE project_id=? AND bucket >= ? GROUP BY bucket ORDER BY bucket",
-                project.getProjectKey(), since
+                "SELECT toStartOfHour(event_time) AS bucket, count() AS count FROM monitor.error_event" +
+                        errorFilter.clause() + " GROUP BY bucket ORDER BY bucket",
+                errorFilter.args()
         ));
         result.put("webVitals", clickHouse.queryForList(
-                "SELECT JSONExtractString(payload,'data','metric') AS metric, avg(JSONExtractFloat(payload,'data','value')) AS value " +
-                        "FROM monitor.performance_event WHERE project_id=? AND event_time >= ? " +
-                        "AND JSONExtractString(payload,'data','metric') IN ('FCP','LCP','CLS','TTFB','INP') GROUP BY metric ORDER BY metric",
-                project.getProjectKey(), since
+                "SELECT JSONExtractString(payload,'data','metric') AS metric, " +
+                        "avg(JSONExtractFloat(payload,'data','value')) AS value " +
+                        "FROM monitor.performance_event" + performanceFilter.clause() +
+                        " AND JSONExtractString(payload,'data','metric') IN ('FCP','LCP','CLS','TTFB','INP') " +
+                        "GROUP BY metric ORDER BY metric",
+                performanceFilter.args()
         ));
         return result;
     }
 
-    public IPage<MonitorIssue> issues(Long projectId, long pageNum, long pageSize, String status) {
+    public IPage<MonitorIssue> issues(
+            Long projectId,
+            long pageNum,
+            long pageSize,
+            String status,
+            int hours,
+            String release) {
+        int safeHours = Math.max(1, Math.min(24 * 365, hours));
+        Date since = Date.from(Instant.now().minus(safeHours, ChronoUnit.HOURS));
+
         var query = Wrappers.<MonitorIssue>lambdaQuery()
                 .eq(MonitorIssue::getProjectId, projectId)
+                .ge(MonitorIssue::getLastSeen, since)
                 .orderByDesc(MonitorIssue::getLastSeen);
-        if (status != null && !status.isBlank()) {
+        if (StringUtils.hasText(status)) {
             query.eq(MonitorIssue::getStatus, status);
+        }
+        if (StringUtils.hasText(release)) {
+            query.eq(MonitorIssue::getLatestRelease, release);
         }
         return issueMapper.selectPage(Page.of(pageNum, pageSize), query);
     }
@@ -117,61 +147,69 @@ public class MonitorQueryService {
 
     public List<Map<String, Object>> issueEvents(MonitorProject project, MonitorIssue issue, int limit) {
         return clickHouse.queryForList(
-                "SELECT event_id,event_time,session_id,user_id,release,page_url,payload " +
+                "SELECT event_id,event_time,session_id,user_id,release,environment,page_url,payload " +
                         "FROM monitor.error_event WHERE project_id=? AND fingerprint=? ORDER BY event_time DESC LIMIT ?",
                 project.getProjectKey(), issue.getFingerprint(), Math.max(1, Math.min(100, limit))
         );
     }
 
-    public Map<String, Object> performance(MonitorProject project, int hours) {
-        int safeHours = Math.max(1, Math.min(24 * 30, hours));
-        Timestamp since = Timestamp.from(Instant.now().minus(safeHours, ChronoUnit.HOURS));
+    public Map<String, Object> performance(
+            MonitorProject project,
+            int hours,
+            String environment,
+            String release) {
+        EventFilter filter = eventFilter(project, hours, environment, release);
         Map<String, Object> result = new LinkedHashMap<>();
         result.put("summary", clickHouse.queryForList(
                 "SELECT JSONExtractString(payload,'data','metric') AS metric, " +
                         "avg(JSONExtractFloat(payload,'data','value')) AS avgValue, " +
                         "quantile(0.75)(JSONExtractFloat(payload,'data','value')) AS p75, " +
                         "quantile(0.95)(JSONExtractFloat(payload,'data','value')) AS p95, count() AS samples " +
-                        "FROM monitor.performance_event WHERE project_id=? AND event_time>=? " +
-                        "GROUP BY metric ORDER BY metric",
-                project.getProjectKey(), since
+                        "FROM monitor.performance_event" + filter.clause() +
+                        " GROUP BY metric ORDER BY metric",
+                filter.args()
         ));
         result.put("trend", clickHouse.queryForList(
                 "SELECT toStartOfHour(event_time) AS bucket, JSONExtractString(payload,'data','metric') AS metric, " +
                         "avg(JSONExtractFloat(payload,'data','value')) AS value " +
-                        "FROM monitor.performance_event WHERE project_id=? AND event_time>=? " +
-                        "GROUP BY bucket,metric ORDER BY bucket,metric",
-                project.getProjectKey(), since
+                        "FROM monitor.performance_event" + filter.clause() +
+                        " GROUP BY bucket,metric ORDER BY bucket,metric",
+                filter.args()
         ));
         result.put("recent", clickHouse.queryForList(
-                "SELECT event_time,page_url,release,JSONExtractString(payload,'data','metric') AS metric," +
-                        "JSONExtractFloat(payload,'data','value') AS value FROM monitor.performance_event " +
-                        "WHERE project_id=? AND event_time>=? ORDER BY event_time DESC LIMIT 200",
-                project.getProjectKey(), since
+                "SELECT event_time,page_url,release,environment,JSONExtractString(payload,'data','metric') AS metric," +
+                        "JSONExtractFloat(payload,'data','value') AS value FROM monitor.performance_event" +
+                        filter.clause() + " ORDER BY event_time DESC LIMIT 200",
+                filter.args()
         ));
         return result;
     }
 
-    public Map<String, Object> apiPerformance(MonitorProject project, int hours) {
-        int safeHours = Math.max(1, Math.min(24 * 30, hours));
-        Timestamp since = Timestamp.from(Instant.now().minus(safeHours, ChronoUnit.HOURS));
+    public Map<String, Object> apiPerformance(
+            MonitorProject project,
+            int hours,
+            String environment,
+            String release) {
+        EventFilter filter = eventFilter(project, hours, environment, release);
         Map<String, Object> result = new LinkedHashMap<>();
         result.put("summary", clickHouse.queryForList(
                 "SELECT JSONExtractString(payload,'data','url') AS url, count() AS requests, " +
                         "avg(JSONExtractFloat(payload,'data','duration')) AS avgRt, " +
                         "quantile(0.95)(JSONExtractFloat(payload,'data','duration')) AS p95, " +
                         "countIf(JSONExtractInt(payload,'data','status')>=400) AS failures " +
-                        "FROM monitor.behavior_event WHERE project_id=? AND event_time>=? " +
-                        "AND JSONExtractString(payload,'data','category')='api' GROUP BY url ORDER BY requests DESC LIMIT 100",
-                project.getProjectKey(), since
+                        "FROM monitor.behavior_event" + filter.clause() +
+                        " AND JSONExtractString(payload,'data','category')='api' " +
+                        "GROUP BY url ORDER BY requests DESC LIMIT 100",
+                filter.args()
         ));
         result.put("trend", clickHouse.queryForList(
                 "SELECT toStartOfHour(event_time) AS bucket, count() AS requests, " +
                         "countIf(JSONExtractInt(payload,'data','status')>=400) AS failures, " +
                         "avg(JSONExtractFloat(payload,'data','duration')) AS avgRt " +
-                        "FROM monitor.behavior_event WHERE project_id=? AND event_time>=? " +
-                        "AND JSONExtractString(payload,'data','category')='api' GROUP BY bucket ORDER BY bucket",
-                project.getProjectKey(), since
+                        "FROM monitor.behavior_event" + filter.clause() +
+                        " AND JSONExtractString(payload,'data','category')='api' " +
+                        "GROUP BY bucket ORDER BY bucket",
+                filter.args()
         ));
         return result;
     }
@@ -189,7 +227,7 @@ public class MonitorQueryService {
         var query = Wrappers.<MonitorReplay>lambdaQuery()
                 .eq(MonitorReplay::getProjectId, projectId)
                 .orderByDesc(MonitorReplay::getId);
-        if (sessionId != null && !sessionId.isBlank()) {
+        if (StringUtils.hasText(sessionId)) {
             query.eq(MonitorReplay::getSessionId, sessionId);
         }
         return replayMapper.selectList(query.last("LIMIT 100"));
@@ -219,5 +257,28 @@ public class MonitorQueryService {
                         .orderByDesc(MonitorAlertRecord::getTriggeredAt)
                         .last("LIMIT 200")
         );
+    }
+
+    private EventFilter eventFilter(
+            MonitorProject project,
+            int hours,
+            String environment,
+            String release) {
+        int safeHours = Math.max(1, Math.min(24 * 365, hours));
+        Timestamp since = Timestamp.from(Instant.now().minus(safeHours, ChronoUnit.HOURS));
+        StringBuilder where = new StringBuilder(" WHERE project_id=? AND event_time>=?");
+        List<Object> args = new ArrayList<>();
+        args.add(project.getProjectKey());
+        args.add(since);
+
+        if (StringUtils.hasText(environment)) {
+            where.append(" AND environment=?");
+            args.add(environment);
+        }
+        if (StringUtils.hasText(release)) {
+            where.append(" AND release=?");
+            args.add(release);
+        }
+        return new EventFilter(where.toString(), args.toArray());
     }
 }

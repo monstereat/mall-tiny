@@ -49,9 +49,11 @@ public class MonitorAdminController {
     @GetMapping("/{projectKey}/dashboard")
     public CommonResult<Map<String, Object>> dashboard(
             @PathVariable String projectKey,
-            @RequestParam(defaultValue = "24") int hours) {
+            @RequestParam(defaultValue = "24") int hours,
+            @RequestParam(required = false) String environment,
+            @RequestParam(required = false) String release) {
         MonitorProject project = adminService.requireProject(projectKey);
-        return CommonResult.success(queryService.dashboard(project, hours));
+        return CommonResult.success(queryService.dashboard(project, hours, environment, release));
     }
 
     @GetMapping("/{projectKey}/issues")
@@ -59,9 +61,13 @@ public class MonitorAdminController {
             @PathVariable String projectKey,
             @RequestParam(defaultValue = "1") long pageNum,
             @RequestParam(defaultValue = "20") long pageSize,
-            @RequestParam(required = false) String status) {
+            @RequestParam(required = false) String status,
+            @RequestParam(defaultValue = "720") int hours,
+            @RequestParam(required = false) String release) {
         MonitorProject project = adminService.requireProject(projectKey);
-        return CommonResult.success(queryService.issues(project.getId(), pageNum, pageSize, status));
+        return CommonResult.success(
+                queryService.issues(project.getId(), pageNum, pageSize, status, hours, release)
+        );
     }
 
     @GetMapping("/{projectKey}/issues/{issueId}")
@@ -89,17 +95,25 @@ public class MonitorAdminController {
     @GetMapping("/{projectKey}/performance")
     public CommonResult<Map<String, Object>> performance(
             @PathVariable String projectKey,
-            @RequestParam(defaultValue = "24") int hours) {
+            @RequestParam(defaultValue = "24") int hours,
+            @RequestParam(required = false) String environment,
+            @RequestParam(required = false) String release) {
         MonitorProject project = adminService.requireProject(projectKey);
-        return CommonResult.success(queryService.performance(project, hours));
+        return CommonResult.success(
+                queryService.performance(project, hours, environment, release)
+        );
     }
 
     @GetMapping("/{projectKey}/apis")
     public CommonResult<Map<String, Object>> apis(
             @PathVariable String projectKey,
-            @RequestParam(defaultValue = "24") int hours) {
+            @RequestParam(defaultValue = "24") int hours,
+            @RequestParam(required = false) String environment,
+            @RequestParam(required = false) String release) {
         MonitorProject project = adminService.requireProject(projectKey);
-        return CommonResult.success(queryService.apiPerformance(project, hours));
+        return CommonResult.success(
+                queryService.apiPerformance(project, hours, environment, release)
+        );
     }
 
     @GetMapping("/{projectKey}/releases")
