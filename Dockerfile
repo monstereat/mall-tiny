@@ -1,10 +1,12 @@
-# 该镜像需要依赖的基础镜像
-FROM openjdk:17
-# 将当前目录下的jar包复制到docker容器的/目录下
-ADD ./mall-tiny-1.0.0-SNAPSHOT.jar /mall-tiny-1.0.0-SNAPSHOT.jar
-# 声明服务运行在8080端口
+FROM maven:3.9.11-eclipse-temurin-17 AS builder
+WORKDIR /workspace
+COPY pom.xml .
+RUN mvn -B -DskipTests dependency:go-offline
+COPY src ./src
+RUN mvn -B -DskipTests package
+
+FROM eclipse-temurin:17-jre
+WORKDIR /app
+COPY --from=builder /workspace/target/*.jar app.jar
 EXPOSE 8080
-# 指定docker容器启动时运行jar包
-ENTRYPOINT ["java", "-jar","/mall-tiny-1.0.0-SNAPSHOT.jar"]
-# 指定维护者的名字
-MAINTAINER macrozheng
+ENTRYPOINT ["java","-XX:+UseContainerSupport","-jar","/app/app.jar"]
