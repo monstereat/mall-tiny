@@ -1,128 +1,367 @@
 # Enterprise Frontend Observability Platform
 
-基于 **mall-tiny 3.x** 二次开发的企业级前端可观测与异常监控平台，开发分支为 `develop-me`。
+基于 **mall-tiny 3.x / Spring Boot 3.5** 二次开发的企业级前端可观测与异常监控平台。
 
-## 技术路线
+开发分支：`develop-me`
 
-- 基础框架：mall-tiny 3.x（Spring Boot 3.5 / Spring Security / JWT / RBAC / MyBatis-Plus / Redis）
-- 工程化参考：RuoYi-Vue-Plus
-- 监控与告警参考：Apache HertzBeat
-- 异常诊断模型参考：Sentry
-- 前端采集参考：web-see / web-see-demo / LianjiaTech fee
-- 核心监控领域：独立实现
+## 1. 项目目标
 
-## 当前实现
-
-### P0 - 基础设施
+把前端线上问题从“用户反馈后人工排查”升级为完整可观测闭环：
 
 ```text
-MySQL 8.4
-Redis 7.4
-Kafka 4.3.1 (KRaft)
-ClickHouse 26.8
-MinIO
-Docker Compose
-```
-
-### P1 - 数据接入
-
-```text
-POST /api/v1/envelope
+Browser / Vue / React
         ↓
-Bean Validation
+monitor/sdk
+Error / Performance / API / Breadcrumb / WhiteScreen / Replay
         ↓
-Redis project rate limit
+Spring Boot Ingest
+API Key / Validation / Rate Limit / Batch
         ↓
-Kafka Producer
-```
-
-Topic：
-
-- `monitor-error-v1`
-- `monitor-performance-v1`
-- `monitor-behavior-v1`
-- `monitor-replay-v1`
-
-### P2 - 数据消费
-
-```text
 Kafka
-  ↓
-Spring Kafka Consumer
-  ↓
-Normalize
-  ↓
-Error Fingerprint
-  ↓
-ClickHouse
+        ↓
+Consumer
+Normalize / Idempotency / Fingerprint / Alert
+        ↓
+┌────────────┬───────────┬──────────┐
+│ ClickHouse │   MySQL   │  MinIO   │
+│ Raw Event  │ Issue等   │ Map/Replay│
+└────────────┴───────────┴──────────┘
+        ↓
+Spring Boot Admin API
+        ↓
+admin / Vue3
+Dashboard / Issue / Performance / API / Release / Replay / Alert
 ```
 
-当前已包含：
+## 2. 参考方案与自研边界
 
-- Error / Performance / Behavior / Replay 分表
-- MergeTree + 月分区
-- Event TTL
-- Error 小时级 Materialized View
-- Error Fingerprint：动态 ID、hash 文件名和 query 参数归一化
-- Project + X-Monitor-Key 鉴权（服务端仅保存 SHA-256 Hash）
-- Redis EventId 幂等窗口
-- Kafka Retry + Dead Letter Topic
-- Error → Fingerprint → MySQL Issue 聚合
-- Redis HyperLogLog 估算 Issue 影响用户数
-- Fingerprint 单元测试
+- **mall-tiny 3.x**：Spring Boot / Spring Security / JWT / RBAC / MyBatis-Plus / Redis 基础骨架。
+- **RuoYi-Vue-Plus**：企业工程化和后台设计参考。
+- **Apache HertzBeat**：监控对象与告警体系参考。
+- **Sentry**：Event → Fingerprint → Issue → SourceMap → Breadcrumb → Replay → Release 产品模型参考。
+- **web-see / web-see-demo / LianjiaTech fee**：浏览器采集、行为轨迹、录屏与监控链路参考。
+- **核心监控代码独立实现**：Ingest、Kafka、ClickHouse、Fingerprint、Issue、SourceMap v3/VLQ、Replay、Alert、Admin API、SDK。
 
-## 启动
+## 3. 目录
+
+```text
+.
+├── src/                         Spring Boot 服务端
+│   └── .../modules/monitor/
+├── monitor/
+│   ├── sdk/
+│   │   └── packages/
+│   │       ├── core/
+│   │       ├── browser/
+│   │       ├── vue/
+│   │       ├── react/
+│   │       └── replay/
+│   ├── demo/                    Vue SDK 联调 Demo
+│   └── scripts/                 Release / SourceMap CI 脚本
+├── admin/                       Vue3 管理后台
+├── infra/clickhouse/init/       ClickHouse 初始化
+├── sql/                         MySQL 初始化
+├── docker-compose.yml           本地基础设施
+└── docker-compose.deploy.yml    完整部署
+```
+
+## 4. 已实现闭环
+
+### SDK
+
+- JavaScript Runtime Error
+- Promise `unhandledrejection`
+- Resource Error
+- Vue Error Handler
+- React Error Boundary
+- Fetch API 耗时和 5xx
+- Breadcrumb：Click / Route / Fetch
+- FCP / LCP / CLS / TTFB / INP
+- Long Task
+- White Screen
+- rrweb Session Replay
+- Batch Queue
+- Sampling
+- PageHide keepalive flush
+- Online 网络恢复 flush
+- 输入和敏感 DOM 默认遮罩
+
+### 数据接入
+
+- `POST /api/v1/envelope`
+- `POST /api/v1/envelope/batch`
+- Project + `X-Monitor-Key`
+- Ingest Key SHA-256 存储
+- Redis 分钟窗口 Rate Limit
+- 单批最多 100 Event
+- Kafka 异步削峰
+
+Kafka Topics：
+
+```text
+monitor-error-v1
+monitor-performance-v1
+monitor-behavior-v1
+monitor-replay-v1
+```
+
+### 消费与存储
+
+- Spring Kafka Consumer
+- EventId Redis 幂等
+- Retry + DLQ
+- Error Fingerprint
+- MySQL Issue Upsert
+- HyperLogLog 影响用户估算
+- ClickHouse MergeTree
+- TTL
+- Materialized View
+- Redis Alert Window
+- MinIO SourceMap / Replay
+
+### 故障定位
+
+```text
+Error
+  ↓
+Fingerprint
+  ↓
+Issue
+  ↓
+Release
+  ↓
+SourceMap v3 / Base64 VLQ
+  ↓
+原始 source / line / column
+  ↓
+Breadcrumb
+  ↓
+Session Replay
+```
+
+SourceMap 不公开到 CDN，由 CI 上传到 MinIO 私有桶。
+
+### Release
+
+- Release Key 与浏览器 Ingest Key 分离
+- Release / Environment / Git Commit / Branch
+- SourceMap Upload
+- Java Source Map v3 / VLQ Resolver
+- `monitor/scripts/release-and-upload-sourcemaps.sh`
+
+### Alert
+
+- Error Count Sliding Window
+- Performance Metric Threshold
+- Redis ZSet Window
+- Cooldown
+- MySQL Alert Record
+- Webhook Notification
+- Admin Rule Create / Update
+
+### Admin
+
+目录：`admin/`
+
+页面：
+
+- Login
+- Projects
+- Dashboard
+- Issues
+- Issue Detail
+- Performance
+- API Performance
+- Releases
+- Session Replay
+- Alerts
+
+管理端支持：
+
+- 创建 Project
+- 生成 Ingest Key / Release Key
+- Key 轮换
+- Issue resolved / unresolved / ignored
+- SourceMap 原始源码定位
+- Replay 播放
+- 告警规则配置
+
+## 5. 本地启动
+
+### 5.1 基础设施
 
 ```bash
 docker compose up -d
-mvn spring-boot:run
 ```
 
-默认基础设施：
+默认端口：
 
 | Service | Address |
 |---|---|
 | MySQL | localhost:3306 |
 | Redis | localhost:6379 |
 | Kafka | localhost:9092 |
-| ClickHouse | localhost:8123 |
+| ClickHouse HTTP | localhost:8123 |
 | MinIO API | localhost:9002 |
 | MinIO Console | localhost:9001 |
 
-## 测试事件
+### 5.2 服务端
 
 ```bash
-curl -X POST http://localhost:8080/api/v1/envelope \
-  -H 'Content-Type: application/json' \
-  -d '{
-    "eventId":"evt-001",
-    "projectId":"demo-web",
-    "eventType":"ERROR",
-    "timestamp":1760000000000,
-    "sessionId":"session-001",
-    "release":"v1.0.0",
-    "environment":"production",
-    "pageUrl":"/order/detail",
-    "sdkVersion":"0.1.0",
-    "data":{
-      "name":"TypeError",
-      "message":"Cannot read properties of undefined",
-      "file":"https://cdn.example.com/app.a1b2c3d4.js",
-      "line":"1",
-      "stack":"TypeError: Cannot read properties of undefined"
-    }
-  }'
+mvn test
+mvn spring-boot:run
 ```
 
-## 下一阶段
+Swagger：
 
-1. TypeScript Monitoring SDK
-2. SourceMap + Release
-3. Breadcrumb / Replay + MinIO
-4. Alert Engine
-5. Vue3 Dashboard
+```text
+http://localhost:8080/swagger-ui/index.html
+```
 
-## License / Attribution
+### 5.3 SDK
+
+```bash
+cd monitor/sdk
+corepack enable
+pnpm install
+pnpm build
+```
+
+### 5.4 Demo
+
+```bash
+cd monitor/demo
+pnpm install
+pnpm dev
+```
+
+### 5.5 Admin
+
+```bash
+cd admin
+pnpm install
+pnpm dev
+```
+
+后台登录使用 mall-tiny 原有管理员账号体系。
+
+## 6. SDK 接入
+
+Vue：
+
+```ts
+import { init } from '@observe/browser';
+import { installVueErrorHandler } from '@observe/vue';
+import { startReplay } from '@observe/replay';
+
+const monitor = init({
+  endpoint: 'https://monitor.example.com/api/v1/envelope',
+  projectId: 'dcrm-web',
+  ingestKey: 'mon_xxx',
+  release: 'v2.3.1',
+  environment: 'production',
+  batchSize: 20,
+  flushInterval: 5000
+});
+
+installVueErrorHandler(app, monitor.client);
+startReplay(monitor.client);
+```
+
+React：
+
+```tsx
+import { ObserveErrorBoundary } from '@observe/react';
+
+<ObserveErrorBoundary client={monitor.client}>
+  <App />
+</ObserveErrorBoundary>
+```
+
+## 7. 发布与 SourceMap
+
+构建前在平台创建项目并保存 Release Key。
+
+```bash
+VERSION=v2.3.1 \
+PROJECT_KEY=dcrm-web \
+RELEASE_KEY=mon_xxx \
+DIST_DIR=dist \
+./monitor/scripts/release-and-upload-sourcemaps.sh
+```
+
+CI 流程：
+
+```text
+Build
+ ↓
+Create Release
+ ↓
+Upload *.map → MinIO
+ ↓
+Deploy JS（不上传 .map）
+ ↓
+SDK release=v2.3.1
+ ↓
+Error
+ ↓
+SourceMap Resolver
+ ↓
+src/*.vue / *.ts
+```
+
+## 8. 完整部署
+
+```bash
+cp .env.example .env
+docker compose -f docker-compose.deploy.yml up -d --build
+```
+
+管理后台：
+
+```text
+http://localhost:8088
+```
+
+服务端：
+
+```text
+http://localhost:8080
+```
+
+## 9. 数据库职责
+
+数据库字段和业务数据后续可以继续扩展，但职责边界固定：
+
+- MySQL：用户、权限、Project、Release、Issue、Alert、Replay 索引。
+- ClickHouse：Error / Performance / Behavior / Replay Event 和聚合分析。
+- Redis：鉴权缓存、Rate Limit、幂等、影响用户估算、告警窗口、Cooldown。
+- MinIO：SourceMap、rrweb Replay 大对象。
+
+## 10. CI
+
+`.github/workflows/monitor-ci.yml` 会验证：
+
+1. Java Compile + Test
+2. monitor/sdk Build
+3. monitor/demo Build
+4. admin Build
+
+## 11. 后续可扩展
+
+当前主链路已闭环，后续增强项：
+
+- OpenTelemetry / TraceId 后端链路关联
+- Spring Boot Actuator / Micrometer / Prometheus
+- Log Search / OpenSearch
+- 告警恢复通知和 Silence
+- 更细的数据权限
+- ClickHouse 更多物化聚合
+- 压测与真实指标
+- AI Issue Summary / Root Cause Suggestion
+
+## 12. License
 
 本项目基于 mall-tiny（Apache-2.0）二次开发，并保留原 LICENSE。
-其他参考项目仅用于架构、产品和领域设计研究；监控核心代码独立实现。
+
+Sentry、web-see 等仅作为架构、功能和产品思路参考，不直接复制其受限源码。
