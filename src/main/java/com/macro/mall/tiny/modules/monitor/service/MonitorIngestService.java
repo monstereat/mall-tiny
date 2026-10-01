@@ -11,10 +11,12 @@ import org.springframework.web.server.ResponseStatusException;
 @RequiredArgsConstructor
 public class MonitorIngestService {
 
+    private final MonitorProjectService projectService;
     private final MonitorRateLimiter rateLimiter;
     private final MonitorEventProducer producer;
 
-    public void ingest(MonitorEventEnvelope event) {
+    public void ingest(String ingestKey, MonitorEventEnvelope event) {
+        projectService.validateIngestKey(event.getProjectId(), ingestKey);
         if (!rateLimiter.tryAcquire(event.getProjectId())) {
             throw new ResponseStatusException(HttpStatus.TOO_MANY_REQUESTS, "monitor ingest rate limit exceeded");
         }

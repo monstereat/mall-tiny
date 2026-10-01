@@ -5,10 +5,7 @@ import com.macro.mall.tiny.modules.monitor.dto.MonitorEventEnvelope;
 import com.macro.mall.tiny.modules.monitor.service.MonitorIngestService;
 import jakarta.validation.Valid;
 import lombok.RequiredArgsConstructor;
-import org.springframework.web.bind.annotation.PostMapping;
-import org.springframework.web.bind.annotation.RequestBody;
-import org.springframework.web.bind.annotation.RequestMapping;
-import org.springframework.web.bind.annotation.RestController;
+import org.springframework.web.bind.annotation.*;
 
 import java.util.Map;
 
@@ -20,8 +17,10 @@ public class MonitorIngestController {
     private final MonitorIngestService ingestService;
 
     @PostMapping("/envelope")
-    public CommonResult<Map<String, Object>> ingest(@Valid @RequestBody MonitorEventEnvelope event) {
-        ingestService.ingest(event);
+    public CommonResult<Map<String, Object>> ingest(
+            @RequestHeader("X-Monitor-Key") String ingestKey,
+            @Valid @RequestBody MonitorEventEnvelope event) {
+        ingestService.ingest(ingestKey, event);
         return CommonResult.success(Map.of(
                 "accepted", true,
                 "eventId", event.getEventId()
