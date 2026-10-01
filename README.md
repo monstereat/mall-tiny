@@ -65,6 +65,19 @@ Dashboard / Issue / Performance / API / Release / Replay / Alert
 └── docker-compose.deploy.yml    完整部署
 ```
 
+## P0～P5 完成状态
+
+| 阶段 | 状态 | 已实现内容 |
+|---|---|---|
+| P0 基础环境 | ✅ | mall-tiny 3.x、MySQL/Redis/Kafka/ClickHouse/MinIO、Docker Compose、CI |
+| P1 SDK + Ingest | ✅ | Error/Performance/API/Breadcrumb、XHR+Fetch、白屏、Web Vitals、统一 Event Protocol、持久化 Batch Queue、指数退避、弱网恢复、Spring Boot 单条/批量 Ingest、Redis 限流、Kafka Producer |
+| P2 Kafka + ClickHouse | ✅ | Kafka Batch Listener、Consumer Group、Retry/DLQ、EventId 幂等、ClickHouse Batch Insert、ReplacingMergeTree、TTL、Materialized View |
+| P3 Dashboard | ✅ | Project 切换、Dashboard 指标/趋势、Issues、Performance、API 页面、ECharts、时间/环境/Release/状态多维筛选 |
+| P4 Fingerprint + Issue | ✅ | Stack/URL/动态 ID Normalize、SHA-256 Fingerprint、Issue 聚合、Affected Users(HyperLogLog)、First/Last Seen、事件幂等、Resolved Issue 重现自动 reopen |
+| P5 SourceMap + Breadcrumb | ✅ | Release、私有 SourceMap 上传、Source Map v3/Base64 VLQ Resolver、自动源码定位、源码上下文、Click/Route/Fetch/XHR Breadcrumb 时间线、Issue→Replay 跳转 |
+
+> 当前 P0～P5 可代码化能力已经完成。数据库表结构、Mapper 和接口均已准备好；你后续只需要按实际环境补充/调整数据库连接、业务字段和真实数据，不需要重做核心架构。
+
 ## 4. 已实现闭环
 
 ### SDK
