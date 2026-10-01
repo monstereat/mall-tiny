@@ -14,6 +14,11 @@ import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
 import java.time.Duration;
+import java.security.SecureRandom;
+import java.util.HexFormat;
+import com.macro.mall.tiny.modules.monitor.dto.MonitorProjectCredentials;
+import com.macro.mall.tiny.modules.monitor.dto.MonitorProjectRequest;
+import org.springframework.transaction.annotation.Transactional;
 
 @Service
 @RequiredArgsConstructor
@@ -23,6 +28,45 @@ public class MonitorProjectService {
 
     private final MonitorProjectMapper projectMapper;
     private final StringRedisTemplate redisTemplate;
+    private final SecureRandom secureRandom = new SecureRandom();
+
+    @Transactional
+    public MonitorProjectCredentials create(MonitorProjectRequest request) {
+        MonitorProject exists = projectMapper.selectOne(
+                Wrappers.<MonitorProject>lambdaQuery()
+                        .eq(MonitorProject::getProjectKey, request.getProjectKey())
+                        .last("LIMIT 1")
+        );
+        if (exists != null) {
+            throw new ResponseStatusException(HttpStatus.CONFLICT, "project key already exists");
+        }
+
+        String ingestKey = generateKey();
+        String releaseKey = generateKey();
+
+        MonitorProject project = new MonitorProject();
+        project.setName(request.getName());
+        project.setProjectKey(request.getProjectKey());
+        project.setPlatform(request.getPlatform() == null || request.getPlatform().isBlank() ? "web" : request.getPlatform());
+        project.setIngestKeyHash(sha256(ingestKey));
+        project.setReleaseKeyHash(sha256(releaseKey));
+        project.setStatus(1);
+        projectMapper.insert(project);
+
+        return new MonitorProjectCredentials(project, ingestKey, releaseKey);
+    }
+
+    @Transactional
+    public MonitorProjectCredentials rotateKeys(String projectKey) {
+        MonitorProject project = requireActiveProject(projectKey);
+        String ingestKey = generateKey();
+        String releaseKey = generateKey();
+        project.setIngestKeyHash(sha256(ingestKey));
+        project.setReleaseKeyHash(sha256(releaseKey));
+        projectMapper.updateById(project);
+        evict(projectKey);
+        return new MonitorProjectCredentials(project, ingestKey, releaseKey);
+    }
 
     public MonitorProject validateIngestKey(String projectKey, String rawIngestKey) {
         MonitorProject project = requireActiveProject(projectKey);
@@ -87,6 +131,12 @@ public class MonitorProjectService {
         if (!constantTimeEquals(expectedHash, sha256(rawKey))) {
             throw new ResponseStatusException(HttpStatus.UNAUTHORIZED, "invalid monitor " + keyType + " key");
         }
+    }
+
+    private String generateKey() {
+        byte[] bytes = new byte[24];
+        secureRandom.nextBytes(bytes);
+        return "mon_" + HexFormat.of().formatHex(bytes);
     }
 
     private String cacheKey(String projectKey) {

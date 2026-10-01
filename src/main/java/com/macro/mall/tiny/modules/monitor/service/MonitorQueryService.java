@@ -123,6 +123,59 @@ public class MonitorQueryService {
         );
     }
 
+    public Map<String, Object> performance(MonitorProject project, int hours) {
+        int safeHours = Math.max(1, Math.min(24 * 30, hours));
+        Timestamp since = Timestamp.from(Instant.now().minus(safeHours, ChronoUnit.HOURS));
+        Map<String, Object> result = new LinkedHashMap<>();
+        result.put("summary", clickHouse.queryForList(
+                "SELECT JSONExtractString(payload,'data','metric') AS metric, " +
+                        "avg(JSONExtractFloat(payload,'data','value')) AS avgValue, " +
+                        "quantile(0.75)(JSONExtractFloat(payload,'data','value')) AS p75, " +
+                        "quantile(0.95)(JSONExtractFloat(payload,'data','value')) AS p95, count() AS samples " +
+                        "FROM monitor.performance_event WHERE project_id=? AND event_time>=? " +
+                        "GROUP BY metric ORDER BY metric",
+                project.getProjectKey(), since
+        ));
+        result.put("trend", clickHouse.queryForList(
+                "SELECT toStartOfHour(event_time) AS bucket, JSONExtractString(payload,'data','metric') AS metric, " +
+                        "avg(JSONExtractFloat(payload,'data','value')) AS value " +
+                        "FROM monitor.performance_event WHERE project_id=? AND event_time>=? " +
+                        "GROUP BY bucket,metric ORDER BY bucket,metric",
+                project.getProjectKey(), since
+        ));
+        result.put("recent", clickHouse.queryForList(
+                "SELECT event_time,page_url,release,JSONExtractString(payload,'data','metric') AS metric," +
+                        "JSONExtractFloat(payload,'data','value') AS value FROM monitor.performance_event " +
+                        "WHERE project_id=? AND event_time>=? ORDER BY event_time DESC LIMIT 200",
+                project.getProjectKey(), since
+        ));
+        return result;
+    }
+
+    public Map<String, Object> apiPerformance(MonitorProject project, int hours) {
+        int safeHours = Math.max(1, Math.min(24 * 30, hours));
+        Timestamp since = Timestamp.from(Instant.now().minus(safeHours, ChronoUnit.HOURS));
+        Map<String, Object> result = new LinkedHashMap<>();
+        result.put("summary", clickHouse.queryForList(
+                "SELECT JSONExtractString(payload,'data','url') AS url, count() AS requests, " +
+                        "avg(JSONExtractFloat(payload,'data','duration')) AS avgRt, " +
+                        "quantile(0.95)(JSONExtractFloat(payload,'data','duration')) AS p95, " +
+                        "countIf(JSONExtractInt(payload,'data','status')>=400) AS failures " +
+                        "FROM monitor.behavior_event WHERE project_id=? AND event_time>=? " +
+                        "AND JSONExtractString(payload,'data','category')='api' GROUP BY url ORDER BY requests DESC LIMIT 100",
+                project.getProjectKey(), since
+        ));
+        result.put("trend", clickHouse.queryForList(
+                "SELECT toStartOfHour(event_time) AS bucket, count() AS requests, " +
+                        "countIf(JSONExtractInt(payload,'data','status')>=400) AS failures, " +
+                        "avg(JSONExtractFloat(payload,'data','duration')) AS avgRt " +
+                        "FROM monitor.behavior_event WHERE project_id=? AND event_time>=? " +
+                        "AND JSONExtractString(payload,'data','category')='api' GROUP BY bucket ORDER BY bucket",
+                project.getProjectKey(), since
+        ));
+        return result;
+    }
+
     public List<MonitorRelease> releases(Long projectId) {
         return releaseMapper.selectList(
                 Wrappers.<MonitorRelease>lambdaQuery()

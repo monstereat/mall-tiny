@@ -2,6 +2,8 @@ package com.macro.mall.tiny.modules.monitor.service;
 
 import com.macro.mall.tiny.modules.monitor.dto.AlertRuleRequest;
 import com.macro.mall.tiny.modules.monitor.mapper.MonitorAlertRuleMapper;
+import com.macro.mall.tiny.modules.monitor.mapper.MonitorIssueMapper;
+import com.macro.mall.tiny.modules.monitor.model.MonitorIssue;
 import com.macro.mall.tiny.modules.monitor.model.MonitorAlertRule;
 import com.macro.mall.tiny.modules.monitor.model.MonitorProject;
 import lombok.RequiredArgsConstructor;
@@ -16,6 +18,7 @@ public class MonitorAdminService {
 
     private final MonitorProjectService projectService;
     private final MonitorAlertRuleMapper alertRuleMapper;
+    private final MonitorIssueMapper issueMapper;
 
     public MonitorProject requireProject(String projectKey) {
         MonitorProject project = projectService.getActiveProject(projectKey);
@@ -41,6 +44,20 @@ public class MonitorAdminService {
         copy(rule, project, request);
         alertRuleMapper.updateById(rule);
         return rule;
+    }
+
+    @Transactional
+    public MonitorIssue updateIssueStatus(MonitorProject project, Long issueId, String status) {
+        if (!java.util.Set.of("unresolved", "resolved", "ignored").contains(status)) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "invalid issue status");
+        }
+        MonitorIssue issue = issueMapper.selectById(issueId);
+        if (issue == null || !project.getId().equals(issue.getProjectId())) {
+            throw new ResponseStatusException(HttpStatus.NOT_FOUND, "issue not found");
+        }
+        issue.setStatus(status);
+        issueMapper.updateById(issue);
+        return issue;
     }
 
     private MonitorAlertRule copy(MonitorAlertRule rule, MonitorProject project, AlertRuleRequest request) {

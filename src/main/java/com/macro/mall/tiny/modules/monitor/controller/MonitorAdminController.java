@@ -26,6 +26,20 @@ public class MonitorAdminController {
     private final MonitorReplayService replayService;
     private final MonitorSourceMapService sourceMapService;
     private final ObjectMapper objectMapper;
+    private final MonitorProjectService projectService;
+
+    @PostMapping("/projects")
+    public CommonResult<com.macro.mall.tiny.modules.monitor.dto.MonitorProjectCredentials> createProject(
+            @Valid @RequestBody com.macro.mall.tiny.modules.monitor.dto.MonitorProjectRequest request) {
+        return CommonResult.success(projectService.create(request));
+    }
+
+    @PostMapping("/projects/{projectKey}/rotate-keys")
+    public CommonResult<com.macro.mall.tiny.modules.monitor.dto.MonitorProjectCredentials> rotateKeys(
+            @PathVariable String projectKey) {
+        adminService.requireProject(projectKey);
+        return CommonResult.success(projectService.rotateKeys(projectKey));
+    }
 
     @GetMapping("/projects")
     public CommonResult<List<MonitorProject>> projects() {
@@ -61,6 +75,31 @@ public class MonitorAdminController {
         result.put("issue", issue);
         result.put("events", issue == null ? List.of() : queryService.issueEvents(project, issue, eventLimit));
         return CommonResult.success(result);
+    }
+
+    @PatchMapping("/{projectKey}/issues/{issueId}/status")
+    public CommonResult<MonitorIssue> updateIssueStatus(
+            @PathVariable String projectKey,
+            @PathVariable Long issueId,
+            @RequestParam String status) {
+        MonitorProject project = adminService.requireProject(projectKey);
+        return CommonResult.success(adminService.updateIssueStatus(project, issueId, status));
+    }
+
+    @GetMapping("/{projectKey}/performance")
+    public CommonResult<Map<String, Object>> performance(
+            @PathVariable String projectKey,
+            @RequestParam(defaultValue = "24") int hours) {
+        MonitorProject project = adminService.requireProject(projectKey);
+        return CommonResult.success(queryService.performance(project, hours));
+    }
+
+    @GetMapping("/{projectKey}/apis")
+    public CommonResult<Map<String, Object>> apis(
+            @PathVariable String projectKey,
+            @RequestParam(defaultValue = "24") int hours) {
+        MonitorProject project = adminService.requireProject(projectKey);
+        return CommonResult.success(queryService.apiPerformance(project, hours));
     }
 
     @GetMapping("/{projectKey}/releases")
