@@ -1,6 +1,7 @@
 package com.macro.mall.tiny.modules.monitor.controller;
 
 import com.macro.mall.tiny.common.api.CommonResult;
+import com.macro.mall.tiny.modules.monitor.dto.MonitorEventBatchRequest;
 import com.macro.mall.tiny.modules.monitor.dto.MonitorEventEnvelope;
 import com.macro.mall.tiny.modules.monitor.service.MonitorIngestService;
 import jakarta.validation.Valid;
@@ -24,6 +25,16 @@ public class MonitorIngestController {
         return CommonResult.success(Map.of(
                 "accepted", true,
                 "eventId", event.getEventId()
+        ));
+    }
+
+    @PostMapping("/envelope/batch")
+    public CommonResult<Map<String, Object>> ingestBatch(
+            @RequestHeader("X-Monitor-Key") String ingestKey,
+            @Valid @RequestBody MonitorEventBatchRequest request) {
+        int accepted = ingestService.ingestBatch(ingestKey, request.getEvents());
+        return CommonResult.success(Map.of(
+                "accepted", accepted
         ));
     }
 }

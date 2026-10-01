@@ -18,10 +18,17 @@ public class MonitorRateLimiter {
     private long rateLimitPerMinute;
 
     public boolean tryAcquire(String projectId) {
+        return tryAcquire(projectId, 1L);
+    }
+
+    public boolean tryAcquire(String projectId, long permits) {
+        if (permits <= 0) {
+            return true;
+        }
         long minuteBucket = Instant.now().getEpochSecond() / 60;
         String key = "monitor:ingest:rate:" + projectId + ":" + minuteBucket;
-        Long count = stringRedisTemplate.opsForValue().increment(key);
-        if (count != null && count == 1L) {
+        Long count = stringRedisTemplate.opsForValue().increment(key, permits);
+        if (count != null && count == permits) {
             stringRedisTemplate.expire(key, Duration.ofMinutes(2));
         }
         return count != null && count <= rateLimitPerMinute;
