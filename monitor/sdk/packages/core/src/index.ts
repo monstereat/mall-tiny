@@ -11,6 +11,9 @@ export interface MonitorClientOptions {
   flushInterval?: number;
   sessionId?: string;
   userId?: string;
+  maxQueueSize?: number;
+  persistQueue?: boolean;
+  retryBaseDelay?: number;
 }
 
 export interface MonitorEventInput {
@@ -37,7 +40,7 @@ export interface MonitorEventEnvelope {
   data: Record<string, unknown>;
 }
 
-const SDK_VERSION = '0.1.0';
+const SDK_VERSION = '0.2.0';
 
 function randomId(): string {
   if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') {
@@ -56,16 +59,19 @@ export class MonitorClient {
   private readonly sessionId: string;
   private userId?: string;
   private timer?: ReturnType<typeof setInterval>;
+  private retryTimer?: ReturnType<typeof setTimeout>;
+  private retryAttempt = 0;
   private flushing = false;
 
   constructor(private readonly options: MonitorClientOptions) {
     this.sessionId = options.sessionId ?? randomId();
     this.userId = options.userId;
+    this.restoreQueue();
 
     const interval = options.flushInterval ?? 5000;
     if (interval > 0) {
       this.timer = setInterval(() => {
-        void this.flush();
+        void this.flush().catch(() => undefined);
       }, interval);
     }
   }
@@ -97,19 +103,52 @@ export class MonitorClient {
       data: input.data
     };
 
-    this.queue.push(event);
+    this.enqueue(event);
     if (this.queue.length >= (this.options.batchSize ?? 20)) {
-      void this.flush();
+      void this.flush().catch(() => undefined);
     }
     return eventId;
+  }
+
+  captureException(error: Error, extra: Record<string, unknown> = {}): string | null {
+    return this.capture({
+      eventType: 'ERROR',
+      data: {
+        name: error.name,
+        message: error.message,
+        stack: error.stack,
+        ...extra
+      }
+    });
+  }
+
+  capturePerformance(metric: string, value: number, extra: Record<string, unknown> = {}): string | null {
+    return this.capture({
+      eventType: 'PERFORMANCE',
+      data: { metric, value, ...extra }
+    });
+  }
+
+  captureBehavior(category: string, data: Record<string, unknown> = {}): string | null {
+    return this.capture({
+      eventType: 'BEHAVIOR',
+      data: { category, ...data }
+    });
   }
 
   async flush(keepalive = false): Promise<void> {
     if (this.flushing || this.queue.length === 0) return;
 
+    if (typeof navigator !== 'undefined' && navigator.onLine === false) {
+      this.persistQueue();
+      this.scheduleRetry();
+      return;
+    }
+
     this.flushing = true;
     const batchSize = Math.max(1, Math.min(100, this.options.batchSize ?? 20));
     const events = this.queue.splice(0, batchSize);
+    this.persistQueue();
 
     try {
       const endpoint = this.options.endpoint.replace(/\/$/, '') + '/batch';
@@ -125,8 +164,15 @@ export class MonitorClient {
       if (!response.ok) {
         throw new Error(`monitor ingest failed: ${response.status}`);
       }
+
+      this.retryAttempt = 0;
+      this.clearRetry();
+      this.persistQueue();
     } catch (error) {
       this.queue.unshift(...events);
+      this.trimQueue();
+      this.persistQueue();
+      this.scheduleRetry();
       throw error;
     } finally {
       this.flushing = false;
@@ -134,7 +180,7 @@ export class MonitorClient {
 
     if (this.queue.length >= batchSize) {
       queueMicrotask(() => {
-        void this.flush();
+        void this.flush().catch(() => undefined);
       });
     }
   }
@@ -144,11 +190,82 @@ export class MonitorClient {
       clearInterval(this.timer);
       this.timer = undefined;
     }
-    await this.flush(true);
+    this.clearRetry();
+    try {
+      await this.flush(true);
+    } finally {
+      this.persistQueue();
+    }
   }
 
   getEndpoint(): string {
     return this.options.endpoint;
+  }
+
+  getSessionId(): string {
+    return this.sessionId;
+  }
+
+  private enqueue(event: MonitorEventEnvelope): void {
+    this.queue.push(event);
+    this.trimQueue();
+    this.persistQueue();
+  }
+
+  private trimQueue(): void {
+    const maxQueueSize = Math.max(100, this.options.maxQueueSize ?? 1000);
+    if (this.queue.length > maxQueueSize) {
+      this.queue.splice(0, this.queue.length - maxQueueSize);
+    }
+  }
+
+  private scheduleRetry(): void {
+    if (this.retryTimer) return;
+    const base = Math.max(500, this.options.retryBaseDelay ?? 1000);
+    const delay = Math.min(30000, base * 2 ** Math.min(this.retryAttempt, 5));
+    this.retryAttempt += 1;
+    this.retryTimer = setTimeout(() => {
+      this.retryTimer = undefined;
+      void this.flush().catch(() => undefined);
+    }, delay);
+  }
+
+  private clearRetry(): void {
+    if (this.retryTimer) {
+      clearTimeout(this.retryTimer);
+      this.retryTimer = undefined;
+    }
+  }
+
+  private storageKey(): string {
+    return `__observe_queue__:${this.options.projectId}`;
+  }
+
+  private restoreQueue(): void {
+    if (this.options.persistQueue === false || typeof localStorage === 'undefined') return;
+    try {
+      const raw = localStorage.getItem(this.storageKey());
+      if (!raw) return;
+      const events = JSON.parse(raw) as MonitorEventEnvelope[];
+      if (!Array.isArray(events)) return;
+      this.queue.push(...events.filter(event => event.projectId === this.options.projectId));
+      this.trimQueue();
+    } catch {
+      // Ignore malformed or inaccessible storage. Monitoring must never break business code.
+    }
+  }
+
+  private persistQueue(): void {
+    if (this.options.persistQueue === false || typeof localStorage === 'undefined') return;
+    try {
+      if (this.queue.length === 0) {
+        localStorage.removeItem(this.storageKey());
+      } else {
+        localStorage.setItem(this.storageKey(), JSON.stringify(this.queue));
+      }
+    } catch {
+      // Storage quota/privacy mode failures are intentionally ignored.
+    }
   }
 
   private device(): Record<string, unknown> {
