@@ -28,6 +28,15 @@ async function load() {
   }
 }
 
+function openIssue(row: MonitorIssue) {
+  void router.push('/issues/' + row.id);
+}
+
+function changePage(value: number) {
+  page.value = value;
+  void load();
+}
+
 watch(() => projects.currentKey, () => { page.value = 1; void load(); }, { immediate: true });
 watch(status, () => { page.value = 1; void load(); });
 </script>
@@ -39,11 +48,12 @@ watch(status, () => { page.value = 1; void load(); });
       <el-select v-model="status" placeholder="状态" clearable style="width:160px">
         <el-option label="未解决" value="unresolved" />
         <el-option label="已解决" value="resolved" />
+        <el-option label="已忽略" value="ignored" />
       </el-select>
       <el-button @click="load">刷新</el-button>
     </div>
     <div class="panel">
-      <el-table v-loading="loading" :data="rows" @row-click="row => router.push('/issues/' + row.id)">
+      <el-table v-loading="loading" :data="rows" @row-click="openIssue">
         <el-table-column prop="title" label="Issue" min-width="320" show-overflow-tooltip />
         <el-table-column prop="eventCount" label="次数" width="90" />
         <el-table-column prop="affectedUsers" label="影响用户" width="110" />
@@ -57,7 +67,7 @@ watch(status, () => { page.value = 1; void load(); });
         :current-page="page"
         :page-size="pageSize"
         :total="total"
-        @current-change="value => { page = value; load(); }"
+        @current-change="changePage"
       />
     </div>
   </section>
