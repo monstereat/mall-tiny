@@ -70,15 +70,16 @@ export function init(options: BrowserMonitorOptions): BrowserMonitor {
         return;
       }
 
-      const target = event.target as (HTMLElement & { src?: string; href?: string }) | null;
-      if (target && target !== window) {
+      const target = event.target;
+      if (target instanceof HTMLElement) {
+        const resource = target as HTMLElement & { src?: string; href?: string };
         client.capture({
           eventType: 'ERROR',
           data: {
             name: 'ResourceError',
             message: 'resource load failed',
-            file: target.src || target.href || '',
-            tagName: target.tagName,
+            file: resource.src || resource.href || '',
+            tagName: resource.tagName,
             breadcrumbs: breadcrumbSnapshot()
           }
         });
