@@ -119,3 +119,18 @@ CREATE TABLE IF NOT EXISTS monitor_alert_record (
   KEY idx_rule_status (rule_id, status)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='告警触发记录';
 
+
+-- ----------------------------
+-- mall-tiny RBAC: 监控管理后台资源
+-- ----------------------------
+INSERT IGNORE INTO ums_resource_category (id, create_time, name, sort)
+VALUES (100, NOW(), '监控模块', 100);
+
+INSERT IGNORE INTO ums_resource (id, create_time, name, url, description, category_id)
+VALUES (1000, NOW(), '监控管理后台', '/monitor/admin/**', 'Observability Admin API', 100);
+
+INSERT INTO ums_role_resource_relation (role_id, resource_id)
+SELECT 5, 1000
+WHERE NOT EXISTS (
+  SELECT 1 FROM ums_role_resource_relation WHERE role_id = 5 AND resource_id = 1000
+);
