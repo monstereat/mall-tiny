@@ -9,6 +9,8 @@ export interface BrowserMonitorOptions extends MonitorClientOptions {
   capturePerformance?: boolean;
   captureFetch?: boolean;
   captureClicks?: boolean;
+  captureWhiteScreen?: boolean;
+  whiteScreenDelay?: number;
   maxBreadcrumbs?: number;
 }
 
@@ -210,6 +212,35 @@ export function init(options: BrowserMonitorOptions): BrowserMonitor {
     });
   }
 
+  if (options.captureWhiteScreen !== false) {
+    const timer = window.setTimeout(() => {
+      const points = [
+        [window.innerWidth / 2, window.innerHeight / 2],
+        [window.innerWidth / 4, window.innerHeight / 4],
+        [window.innerWidth * 3 / 4, window.innerHeight / 4],
+        [window.innerWidth / 4, window.innerHeight * 3 / 4],
+        [window.innerWidth * 3 / 4, window.innerHeight * 3 / 4]
+      ];
+      const emptyTags = new Set(['HTML', 'BODY']);
+      const emptyCount = points.reduce((count, [x, y]) => {
+        const node = document.elementFromPoint(x, y);
+        return count + (!node || emptyTags.has(node.tagName) ? 1 : 0);
+      }, 0);
+      if (emptyCount >= 4) {
+        client.capture({
+          eventType: 'ERROR',
+          data: {
+            name: 'WhiteScreenError',
+            message: 'page white screen detected',
+            emptyPoints: emptyCount,
+            breadcrumbs: breadcrumbSnapshot()
+          }
+        });
+      }
+    }, options.whiteScreenDelay ?? 3000);
+    cleanup.push(() => window.clearTimeout(timer));
+  }
+
   if (options.capturePerformance !== false && typeof PerformanceObserver !== 'undefined') {
     const observe = (entryType: string, handler: (entry: PerformanceEntry) => void): void => {
       if (!PerformanceObserver.supportedEntryTypes?.includes(entryType)) return;
@@ -234,6 +265,25 @@ export function init(options: BrowserMonitorOptions): BrowserMonitor {
         eventType: 'PERFORMANCE',
         data: { metric: 'LCP', value: entry.startTime }
       });
+    });
+
+    observe('longtask', entry => {
+      client.capture({
+        eventType: 'PERFORMANCE',
+        data: { metric: 'LongTask', value: entry.duration }
+      });
+    });
+
+    let inp = 0;
+    observe('event', entry => {
+      const timing = entry as PerformanceEntry & { interactionId?: number; duration?: number };
+      if ((timing.interactionId ?? 0) > 0 && (timing.duration ?? 0) > inp) {
+        inp = timing.duration ?? 0;
+        client.capture({
+          eventType: 'PERFORMANCE',
+          data: { metric: 'INP', value: inp }
+        });
+      }
     });
 
     let cls = 0;
@@ -261,6 +311,12 @@ export function init(options: BrowserMonitorOptions): BrowserMonitor {
 
     cleanup.push(() => observers.forEach(observer => observer.disconnect()));
   }
+
+  const onlineHandler = (): void => {
+    void client.flush().catch(() => undefined);
+  };
+  window.addEventListener('online', onlineHandler);
+  cleanup.push(() => window.removeEventListener('online', onlineHandler));
 
   const pageHideHandler = (): void => {
     void client.flush(true).catch(() => undefined);
