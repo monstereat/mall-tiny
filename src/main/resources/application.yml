@@ -3,14 +3,23 @@ server:
 
 spring:
   application:
-    name: mall-tiny
+    name: observability-platform
   profiles:
     active: dev
-#  main:
-#    allow-circular-references: true
   mvc:
     pathmatch:
       matching-strategy: ant_path_matcher
+  kafka:
+    bootstrap-servers: ${KAFKA_BOOTSTRAP_SERVERS:localhost:9092}
+    producer:
+      key-serializer: org.apache.kafka.common.serialization.StringSerializer
+      value-serializer: org.apache.kafka.common.serialization.StringSerializer
+      acks: all
+    consumer:
+      group-id: monitor-worker-v1
+      auto-offset-reset: earliest
+      key-deserializer: org.apache.kafka.common.serialization.StringDeserializer
+      value-deserializer: org.apache.kafka.common.serialization.StringDeserializer
 
 mybatis-plus:
   mapper-locations: classpath:/mapper/**/*.xml
@@ -22,22 +31,36 @@ mybatis-plus:
     map-underscore-to-camel-case: true
 
 jwt:
-  tokenHeader: Authorization #JWT存储的请求头
-  secret: mall-admin-secret #JWT加解密使用的密钥
-  expiration: 604800 #JWT的超期限时间(60*60*24*7)
-  tokenHead: 'Bearer '  #JWT负载中拿到开头
+  tokenHeader: Authorization
+  secret: observability-admin-secret
+  expiration: 604800
+  tokenHead: 'Bearer '
 
 redis:
-  database: mall
+  database: monitor
   key:
     admin: 'ums:admin'
     resourceList: 'ums:resourceList'
   expire:
-    common: 86400 # 24小时
+    common: 86400
+
+monitor:
+  ingest:
+    rate-limit-per-minute: ${MONITOR_RATE_LIMIT_PER_MINUTE:5000}
+  kafka:
+    topics:
+      error: monitor-error-v1
+      performance: monitor-performance-v1
+      behavior: monitor-behavior-v1
+      replay: monitor-replay-v1
+  clickhouse:
+    url: ${CLICKHOUSE_JDBC_URL:jdbc:clickhouse://localhost:8123/monitor}
+    username: ${CLICKHOUSE_USERNAME:default}
+    password: ${CLICKHOUSE_PASSWORD:monitor}
 
 secure:
   ignored:
-    urls: #安全路径白名单
+    urls:
       - /
       - /swagger-ui.html
       - /swagger-ui/
@@ -54,3 +77,4 @@ secure:
       - /admin/register
       - /admin/info
       - /admin/logout
+      - /api/v1/envelope
