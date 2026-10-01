@@ -64,6 +64,11 @@ ClickHouse
 - Event TTL
 - Error 小时级 Materialized View
 - Error Fingerprint：动态 ID、hash 文件名和 query 参数归一化
+- Project + X-Monitor-Key 鉴权（服务端仅保存 SHA-256 Hash）
+- Redis EventId 幂等窗口
+- Kafka Retry + Dead Letter Topic
+- Error → Fingerprint → MySQL Issue 聚合
+- Redis HyperLogLog 估算 Issue 影响用户数
 - Fingerprint 单元测试
 
 ## 启动
@@ -111,14 +116,11 @@ curl -X POST http://localhost:8080/api/v1/envelope \
 
 ## 下一阶段
 
-1. Project / API Key 校验
-2. Issue 聚合落 MySQL
-3. Kafka Retry / DLQ
-4. TypeScript Monitoring SDK
-5. SourceMap + Release
-6. Breadcrumb / Replay + MinIO
-7. Alert Engine
-8. Vue3 Dashboard
+1. TypeScript Monitoring SDK
+2. SourceMap + Release
+3. Breadcrumb / Replay + MinIO
+4. Alert Engine
+5. Vue3 Dashboard
 
 ## License / Attribution
 
