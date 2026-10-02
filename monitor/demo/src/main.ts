@@ -4,8 +4,11 @@ import { init } from '@observe/browser';
 import { installVueErrorHandler } from '@observe/vue';
 import { startReplay } from '@observe/replay';
 
+const endpoint = 'http://localhost:8080/api/v1/envelope';
+
 const monitor = init({
-  endpoint: 'http://localhost:8080/api/v1/envelope',
+  endpoint,
+  tracePropagation: [new URL(endpoint).origin],
   projectId: 'demo-web',
   ingestKey: 'dev-monitor-key',
   release: 'v1.0.0',
@@ -19,7 +22,7 @@ const monitor = init({
 });
 
 const app = createApp(App);
-installVueErrorHandler(app, monitor.client);
+installVueErrorHandler(app, monitor.client, () => monitor.breadcrumbs);
 const replay = startReplay(monitor.client, {
   flushInterval: 10000,
   maskAllInputs: true

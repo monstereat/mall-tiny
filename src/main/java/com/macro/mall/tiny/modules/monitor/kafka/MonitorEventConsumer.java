@@ -8,6 +8,12 @@ import com.macro.mall.tiny.modules.monitor.model.MonitorProject;
 import com.macro.mall.tiny.modules.monitor.model.MonitorReplay;
 import com.macro.mall.tiny.modules.monitor.repository.ClickHouseEventRepository;
 import com.macro.mall.tiny.modules.monitor.service.*;
+import io.micrometer.tracing.Link;
+import io.micrometer.tracing.Span;
+import io.micrometer.tracing.TraceContext;
+import io.micrometer.tracing.Tracer;
+import org.apache.kafka.clients.consumer.ConsumerRecord;
+import org.apache.kafka.common.header.Header;
 import lombok.RequiredArgsConstructor;
 import org.springframework.kafka.annotation.KafkaListener;
 import org.springframework.stereotype.Component;
@@ -16,10 +22,17 @@ import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.nio.charset.StandardCharsets;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 
 @Component
 @RequiredArgsConstructor
 public class MonitorEventConsumer {
+
+    private static final Pattern TRACEPARENT = Pattern.compile(
+            "(?i)^([0-9a-f]{2})-([0-9a-f]{32})-([0-9a-f]{16})-([0-9a-f]{2})(?:-([0-9a-f]+))?$"
+    );
 
     private record PreparedEvent(
             MonitorEventEnvelope event,
@@ -36,32 +49,73 @@ public class MonitorEventConsumer {
     private final MonitorEventDeduplicator deduplicator;
     private final MonitorReplayService replayService;
     private final MonitorAlertEngine alertEngine;
+    private final Tracer tracer;
 
     @KafkaListener(topics = "${monitor.kafka.topics.error}")
-    public void consumeError(List<String> payloads) {
-        persistBatch(payloads, MonitorEventType.ERROR);
+    public void consumeError(List<ConsumerRecord<String, String>> records) {
+        persistBatch(records, MonitorEventType.ERROR);
     }
 
     @KafkaListener(topics = "${monitor.kafka.topics.performance}")
-    public void consumePerformance(List<String> payloads) {
-        persistBatch(payloads, MonitorEventType.PERFORMANCE);
+    public void consumePerformance(List<ConsumerRecord<String, String>> records) {
+        persistBatch(records, MonitorEventType.PERFORMANCE);
     }
 
     @KafkaListener(topics = "${monitor.kafka.topics.behavior}")
-    public void consumeBehavior(List<String> payloads) {
-        persistBatch(payloads, MonitorEventType.BEHAVIOR);
+    public void consumeBehavior(List<ConsumerRecord<String, String>> records) {
+        persistBatch(records, MonitorEventType.BEHAVIOR);
     }
 
     @KafkaListener(topics = "${monitor.kafka.topics.replay}")
-    public void consumeReplay(List<String> payloads) {
-        persistBatch(payloads, MonitorEventType.REPLAY);
+    public void consumeReplay(List<ConsumerRecord<String, String>> records) {
+        persistBatch(records, MonitorEventType.REPLAY);
     }
 
-    private void persistBatch(List<String> payloads, MonitorEventType expectedType) {
-        if (payloads == null || payloads.isEmpty()) {
+    private void persistBatch(List<ConsumerRecord<String, String>> records, MonitorEventType expectedType) {
+        if (records == null || records.isEmpty()) {
             return;
         }
 
+        List<TraceContext> parents = records.stream()
+                .map(record -> traceContext(record.headers().lastHeader("traceparent")))
+                .filter(context -> context != null)
+                .toList();
+        TraceContext primaryParent = parents.stream()
+                .filter(context -> Boolean.TRUE.equals(context.sampled()))
+                .findFirst()
+                .orElseGet(() -> parents.stream().findFirst().orElse(null));
+
+        Span.Builder spanBuilder = tracer.spanBuilder()
+                .name("monitor.kafka.consume")
+                .kind(Span.Kind.CONSUMER)
+                .tag("messaging.system", "kafka")
+                .tag("messaging.operation", "process")
+                .tag("messaging.destination.name", records.get(0).topic())
+                .tag("messaging.batch.message_count", records.size());
+        if (primaryParent == null) {
+            spanBuilder.setNoParent();
+        } else {
+            spanBuilder.setParent(primaryParent);
+            for (TraceContext parent : parents) {
+                if (!parent.traceId().equals(primaryParent.traceId())
+                        || !parent.spanId().equals(primaryParent.spanId())) {
+                    spanBuilder.addLink(new Link(parent));
+                }
+            }
+        }
+        Span batchSpan = spanBuilder.start();
+
+        try (Tracer.SpanInScope ignored = tracer.withSpan(batchSpan)) {
+            persistPayloads(records.stream().map(ConsumerRecord::value).toList(), expectedType);
+        } catch (RuntimeException ex) {
+            batchSpan.error(ex);
+            throw ex;
+        } finally {
+            batchSpan.end();
+        }
+    }
+
+    private void persistPayloads(List<String> payloads, MonitorEventType expectedType) {
         List<PreparedEvent> prepared = new ArrayList<>();
         List<String> reservedEventIds = new ArrayList<>();
 
@@ -121,6 +175,33 @@ public class MonitorEventConsumer {
             reservedEventIds.forEach(deduplicator::release);
             throw ex;
         }
+    }
+
+    private TraceContext traceContext(Header header) {
+        if (header == null) {
+            return null;
+        }
+
+        Matcher matcher = TRACEPARENT.matcher(new String(header.value(), StandardCharsets.UTF_8));
+        if (!matcher.matches()) {
+            return null;
+        }
+
+        String version = matcher.group(1);
+        String traceId = matcher.group(2);
+        String spanId = matcher.group(3);
+        if ("ff".equalsIgnoreCase(version)
+                || traceId.matches("0{32}")
+                || spanId.matches("0{16}")) {
+            return null;
+        }
+
+        boolean sampled = (Integer.parseInt(matcher.group(4), 16) & 1) == 1;
+        return tracer.traceContextBuilder()
+                .traceId(traceId)
+                .spanId(spanId)
+                .sampled(sampled)
+                .build();
     }
 
     private MonitorEventEnvelope parse(String payload) {

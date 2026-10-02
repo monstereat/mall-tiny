@@ -42,3 +42,39 @@ jobs:
         run: |
           pnpm install --no-frozen-lockfile
           pnpm build
+
+  infrastructure-e2e:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    env:
+      COMPOSE_PROJECT_NAME: monitor-platform-ci-${{ github.run_id }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Enable pnpm
+        run: |
+          corepack enable
+          corepack prepare pnpm@10.17.1 --activate
+
+      - name: Install monitoring workspace dependencies
+        working-directory: monitor/sdk
+        run: pnpm install --no-frozen-lockfile
+
+      - name: Build the monitoring SDK and demo
+        working-directory: monitor/sdk
+        run: pnpm build
+
+      - name: Install pinned Playwright Chromium
+        working-directory: monitor/demo
+        run: pnpm exec playwright install --with-deps chromium
+
+      - name: Start the monitoring stack and browser demo
+        run: |
+          trap 'docker compose -p "$COMPOSE_PROJECT_NAME" -f docker-compose.deploy.yml -f monitor/demo/docker-compose.e2e.yml down --remove-orphans' EXIT
+          docker compose -p "$COMPOSE_PROJECT_NAME" -f docker-compose.deploy.yml -f monitor/demo/docker-compose.e2e.yml up -d --build
+          pnpm --dir monitor/demo test:e2e:trace
+          bash monitor/scripts/e2e-smoke.sh

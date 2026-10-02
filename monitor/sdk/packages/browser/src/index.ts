@@ -13,6 +13,7 @@ export interface BrowserMonitorOptions extends MonitorClientOptions {
   captureWhiteScreen?: boolean;
   captureResourceTiming?: boolean;
   captureNavigation?: boolean;
+  tracePropagation?: 'same-origin' | 'all' | string[];
   whiteScreenDelay?: number;
   maxBreadcrumbs?: number;
 }
@@ -63,6 +64,53 @@ function isIngestUrl(url: string, endpoint: string): boolean {
   return url.startsWith(endpoint.replace(/\/$/, ''));
 }
 
+function newTraceId(): string {
+  return [...crypto.getRandomValues(new Uint8Array(16))]
+    .map(value => value.toString(16).padStart(2, '0')).join('');
+}
+
+function traceIdFromParent(value: string | null): string | undefined {
+  const match = value?.trim().match(/^00-([0-9a-f]{32})-([0-9a-f]{16})-[0-9a-f]{2}$/i);
+  if (!match || /^0+$/.test(match[1]) || /^0+$/.test(match[2])) return undefined;
+  return match[1];
+}
+
+function matchingResponseTraceparent(value: string | null, traceId?: string): string | undefined {
+  const match = value?.trim().match(/^00-([0-9a-f]{32})-([0-9a-f]{16})-([0-9a-f]{2})$/i);
+  if (!match || !traceId
+      || match[1].toLowerCase() !== traceId.toLowerCase()
+      || /^0+$/.test(match[1])
+      || /^0+$/.test(match[2])) {
+    return undefined;
+  }
+  return value?.trim().toLowerCase();
+}
+
+function newTraceparent(traceId = newTraceId()): string {
+  const spanId = [...crypto.getRandomValues(new Uint8Array(8))]
+    .map(value => value.toString(16).padStart(2, '0')).join('');
+  return `00-${traceId}-${spanId}-01`;
+}
+
+function canPropagateTrace(url: string, mode: BrowserMonitorOptions['tracePropagation']): boolean {
+  if (mode === 'all') return true;
+  try {
+    const targetOrigin = new URL(url, location.href).origin;
+    if (Array.isArray(mode)) {
+      return mode.some(origin => {
+        try {
+          return new URL(origin).origin === targetOrigin;
+        } catch {
+          return false;
+        }
+      });
+    }
+    return targetOrigin === location.origin;
+  } catch {
+    return false;
+  }
+}
+
 export function init(options: BrowserMonitorOptions): BrowserMonitor {
   const client = new MonitorClient(options);
   const breadcrumbs: Breadcrumb[] = [];
@@ -70,6 +118,7 @@ export function init(options: BrowserMonitorOptions): BrowserMonitor {
   const cleanup: Array<() => void> = [];
   const observers: PerformanceObserver[] = [];
   const ingestPrefix = options.endpoint.replace(/\/$/, '');
+  let lastTraceId: string | undefined;
 
   const addBreadcrumb = (breadcrumb: Omit<Breadcrumb, 'timestamp'>): void => {
     breadcrumbs.push({ ...breadcrumb, timestamp: Date.now() });
@@ -86,6 +135,7 @@ export function init(options: BrowserMonitorOptions): BrowserMonitor {
       if (event instanceof ErrorEvent && event.error) {
         client.capture({
           eventType: 'ERROR',
+          traceId: lastTraceId,
           data: {
             name: event.error.name ?? 'Error',
             message: event.message,
@@ -93,6 +143,7 @@ export function init(options: BrowserMonitorOptions): BrowserMonitor {
             file: event.filename,
             line: event.lineno,
             column: event.colno,
+            traceId: lastTraceId,
             breadcrumbs: breadcrumbSnapshot()
           }
         });
@@ -119,10 +170,12 @@ export function init(options: BrowserMonitorOptions): BrowserMonitor {
       const reason = event.reason;
       client.capture({
         eventType: 'ERROR',
+        traceId: lastTraceId,
         data: {
           name: reason instanceof Error ? reason.name : 'UnhandledRejection',
           message: reason instanceof Error ? reason.message : text(reason),
           stack: reason instanceof Error ? reason.stack : undefined,
+          traceId: lastTraceId,
           breadcrumbs: breadcrumbSnapshot()
         }
       });
@@ -183,9 +236,23 @@ export function init(options: BrowserMonitorOptions): BrowserMonitor {
         return originalFetch(...args);
       }
 
+      const requestHeaders = new Headers(args[1]?.headers ?? (args[0] instanceof Request ? args[0].headers : undefined));
+      const existingParent = requestHeaders.get('traceparent');
+      const hasExistingParent = requestHeaders.has('traceparent');
+      const propagateTrace = canPropagateTrace(url, options.tracePropagation);
+      const inheritedTraceId = traceIdFromParent(existingParent);
+      const traceId = inheritedTraceId ?? (!hasExistingParent && propagateTrace ? newTraceId() : undefined);
+      lastTraceId = traceId;
+      if (propagateTrace && !hasExistingParent) {
+        requestHeaders.set('traceparent', newTraceparent(traceId));
+      }
       const startedAt = performance.now();
       try {
-        const response = await originalFetch(...args);
+        const response = await originalFetch(args[0], { ...args[1], headers: requestHeaders });
+        const responseTraceparent = matchingResponseTraceparent(
+          response.headers.get('traceparent'),
+          traceId
+        );
         const duration = performance.now() - startedAt;
         const method = args[1]?.method || (args[0] instanceof Request ? args[0].method : 'GET');
         addBreadcrumb({
@@ -198,31 +265,35 @@ export function init(options: BrowserMonitorOptions): BrowserMonitor {
           url,
           status: response.status,
           duration
-        });
+        }, traceId, responseTraceparent);
 
         if (response.status >= 500) {
           client.capture({
             eventType: 'ERROR',
+            traceId,
             data: {
               name: 'HttpError',
               message: `HTTP ${response.status} ${url}`,
               file: url,
               status: response.status,
               duration,
+              traceId,
               breadcrumbs: breadcrumbSnapshot()
             }
-          });
+          }, responseTraceparent);
         }
         return response;
       } catch (error) {
         const duration = performance.now() - startedAt;
         client.capture({
           eventType: 'ERROR',
+          traceId,
           data: {
             name: error instanceof Error ? error.name : 'FetchError',
             message: error instanceof Error ? error.message : text(error),
             file: url,
             duration,
+            traceId,
             breadcrumbs: breadcrumbSnapshot()
           }
         });
@@ -238,7 +309,16 @@ export function init(options: BrowserMonitorOptions): BrowserMonitor {
   if (options.captureXhr !== false && typeof XMLHttpRequest !== 'undefined') {
     const originalOpen = XMLHttpRequest.prototype.open;
     const originalSend = XMLHttpRequest.prototype.send;
-    const meta = new WeakMap<XMLHttpRequest, { method: string; url: string; startedAt?: number }>();
+    const originalSetRequestHeader = XMLHttpRequest.prototype.setRequestHeader;
+    const meta = new WeakMap<XMLHttpRequest, {
+      method: string; url: string; startedAt?: number; traceId?: string
+    }>();
+    const suppliedTraceparent = new WeakMap<XMLHttpRequest, string>();
+
+    XMLHttpRequest.prototype.setRequestHeader = function (this: XMLHttpRequest, name: string, value: string): void {
+      originalSetRequestHeader.call(this, name, value);
+      if (name.toLowerCase() === 'traceparent') suppliedTraceparent.set(this, value);
+    };
 
     XMLHttpRequest.prototype.open = function (
       this: XMLHttpRequest,
@@ -246,6 +326,7 @@ export function init(options: BrowserMonitorOptions): BrowserMonitor {
       url: string | URL,
       ...rest: any[]
     ): void {
+      suppliedTraceparent.delete(this);
       meta.set(this, { method: method.toUpperCase(), url: sanitizeUrl(String(url)) });
       (originalOpen as any).call(this, method, url, ...rest);
     } as typeof XMLHttpRequest.prototype.open;
@@ -261,7 +342,20 @@ export function init(options: BrowserMonitorOptions): BrowserMonitor {
       }
 
       item.startedAt = performance.now();
+      const existingParent = suppliedTraceparent.get(this);
+      const hasExistingParent = suppliedTraceparent.has(this);
+      const propagateTrace = canPropagateTrace(item.url, options.tracePropagation);
+      const inheritedTraceId = traceIdFromParent(existingParent ?? null);
+      item.traceId = inheritedTraceId ?? (!hasExistingParent && propagateTrace ? newTraceId() : undefined);
+      lastTraceId = item.traceId;
+      if (!hasExistingParent && propagateTrace) {
+        this.setRequestHeader('traceparent', newTraceparent(item.traceId));
+      }
       this.addEventListener('loadend', () => {
+        const responseTraceparent = matchingResponseTraceparent(
+          this.getResponseHeader('traceparent'),
+          item.traceId
+        );
         const duration = performance.now() - (item.startedAt ?? performance.now());
         addBreadcrumb({
           type: 'xhr',
@@ -278,11 +372,12 @@ export function init(options: BrowserMonitorOptions): BrowserMonitor {
           url: item.url,
           status: this.status,
           duration
-        });
+        }, item.traceId, responseTraceparent);
 
         if (this.status === 0 || this.status >= 500) {
           client.capture({
             eventType: 'ERROR',
+            traceId: item.traceId,
             data: {
               name: this.status === 0 ? 'XhrNetworkError' : 'HttpError',
               message: this.status === 0
@@ -291,9 +386,10 @@ export function init(options: BrowserMonitorOptions): BrowserMonitor {
               file: item.url,
               status: this.status,
               duration,
+              traceId: item.traceId,
               breadcrumbs: breadcrumbSnapshot()
             }
-          });
+          }, responseTraceparent);
         }
       }, { once: true });
 
@@ -303,6 +399,7 @@ export function init(options: BrowserMonitorOptions): BrowserMonitor {
     cleanup.push(() => {
       XMLHttpRequest.prototype.open = originalOpen;
       XMLHttpRequest.prototype.send = originalSend;
+      XMLHttpRequest.prototype.setRequestHeader = originalSetRequestHeader;
     });
   }
 

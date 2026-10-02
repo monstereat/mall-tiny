@@ -1,17 +1,46 @@
 server:
   port: 8080
 
+management:
+  server:
+    port: 8081
+  endpoints:
+    web:
+      exposure:
+        include: health,info,metrics,prometheus
+  endpoint:
+    health:
+      probes:
+        enabled: true
+      show-details: never
+  metrics:
+    tags:
+      application: ${spring.application.name}
+  otlp:
+    tracing:
+      endpoint: ${OTEL_EXPORTER_OTLP_ENDPOINT:http://localhost:4318/v1/traces}
+      export:
+        enabled: true
+
 spring:
   application:
     name: observability-platform
   profiles:
     active: dev
+  servlet:
+    multipart:
+      max-file-size: 10MB
+      max-request-size: 12MB
   mvc:
     pathmatch:
       matching-strategy: ant_path_matcher
   kafka:
     bootstrap-servers: ${KAFKA_BOOTSTRAP_SERVERS:localhost:9092}
+    template:
+      observation-enabled: true
     producer:
+      properties:
+        max.request.size: ${MONITOR_KAFKA_MAX_REQUEST_SIZE:10485760}
       key-serializer: org.apache.kafka.common.serialization.StringSerializer
       value-serializer: org.apache.kafka.common.serialization.StringSerializer
       acks: all
@@ -19,6 +48,9 @@ spring:
       group-id: monitor-worker-v1
       auto-offset-reset: earliest
       max-poll-records: ${MONITOR_KAFKA_MAX_POLL_RECORDS:200}
+      properties:
+        fetch.max.bytes: ${MONITOR_KAFKA_FETCH_MAX_BYTES:16777216}
+        max.partition.fetch.bytes: ${MONITOR_KAFKA_MAX_PARTITION_FETCH_BYTES:10485760}
       key-deserializer: org.apache.kafka.common.serialization.StringDeserializer
       value-deserializer: org.apache.kafka.common.serialization.StringDeserializer
     listener:
@@ -66,6 +98,7 @@ monitor:
     access-key: ${MINIO_ACCESS_KEY:monitor}
     secret-key: ${MINIO_SECRET_KEY:monitor123456}
     source-map-bucket: ${MINIO_SOURCEMAP_BUCKET:monitor-sourcemaps}
+    replay-retention-days: ${MONITOR_REPLAY_RETENTION_DAYS:30}
 
 secure:
   ignored:
@@ -87,3 +120,7 @@ secure:
       - /admin/info
       - /admin/logout
       - /api/v1/envelope
+
+logging:
+  pattern:
+    level: "%5p [trace=%X{traceId:-}]"

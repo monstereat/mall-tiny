@@ -1,0 +1,13 @@
+x-monitor-service-labels: &monitor-service-labels
+  com.monstereat.observability: "true"
+
+services:
+  demo:
+    image: nginx:1.29.4-alpine
+    labels: *monitor-service-labels
+    depends_on:
+      - server
+    ports:
+      - "5174:80"
+    volumes:
+      - ./monitor/demo/dist:/usr/share/nginx/html:ro

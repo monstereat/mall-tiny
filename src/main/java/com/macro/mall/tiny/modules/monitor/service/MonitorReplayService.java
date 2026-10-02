@@ -14,8 +14,11 @@ import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
 
 import java.io.ByteArrayInputStream;
+import java.io.ByteArrayOutputStream;
+import java.io.IOException;
 import java.io.InputStream;
-import java.nio.charset.StandardCharsets;
+import java.util.zip.GZIPInputStream;
+import java.util.zip.GZIPOutputStream;
 import java.util.Collection;
 import java.util.Date;
 import java.util.Map;
@@ -37,19 +40,22 @@ public class MonitorReplayService {
         Object replayEvents = data == null ? null : data.get("events");
 
         try {
-            byte[] bytes = objectMapper.writeValueAsBytes(replayEvents == null ? data : replayEvents);
+            byte[] json = objectMapper.writeValueAsBytes(replayEvents == null ? data : replayEvents);
+            byte[] compressed = gzip(json);
+            boolean useCompression = compressed.length < json.length;
+            byte[] bytes = useCompression ? compressed : json;
             bucketService.ensureBucket(replayBucket);
             String objectKey = project.getProjectKey() + "/" +
                     safe(event.getRelease()) + "/" +
-                    event.getSessionId() + "/" +
-                    event.getEventId() + ".json";
+                    safe(event.getSessionId()) + "/" +
+                    safe(event.getEventId()) + (useCompression ? ".json.gz" : ".json");
 
             minioClient.putObject(
                     PutObjectArgs.builder()
                             .bucket(replayBucket)
                             .object(objectKey)
                             .stream(new ByteArrayInputStream(bytes), bytes.length, -1)
-                            .contentType("application/json")
+                            .contentType(useCompression ? "application/gzip" : "application/json")
                             .build()
             );
 
@@ -74,11 +80,22 @@ public class MonitorReplayService {
                 GetObjectArgs.builder()
                         .bucket(replayBucket)
                         .object(replay.getObjectKey())
-                        .build())) {
-            return input.readAllBytes();
+                        .build());
+             InputStream decoded = replay.getObjectKey().endsWith(".gz")
+                     ? new GZIPInputStream(input)
+                     : input) {
+            return decoded.readAllBytes();
         } catch (Exception e) {
             throw new IllegalStateException("session replay read failed", e);
         }
+    }
+
+    private byte[] gzip(byte[] bytes) throws IOException {
+        ByteArrayOutputStream output = new ByteArrayOutputStream();
+        try (GZIPOutputStream gzip = new GZIPOutputStream(output)) {
+            gzip.write(bytes);
+        }
+        return output.toByteArray();
     }
 
     private String safe(String value) {

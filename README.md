@@ -23,7 +23,7 @@ Consumer
 Normalize / Idempotency / Fingerprint / Alert
         ↓
 ┌────────────┬───────────┬──────────┐
-│ ClickHouse │   MySQL   │  MinIO   │
+│ ClickHouse │   MySQL   │ RustFS/S3 │
 │ Raw Event  │ Issue等   │ Map/Replay│
 └────────────┴───────────┴──────────┘
         ↓
@@ -69,7 +69,7 @@ Dashboard / Issue / Performance / API / Release / Replay / Alert
 
 | 阶段 | 状态 | 已实现内容 |
 |---|---|---|
-| P0 基础环境 | ✅ | mall-tiny 3.x、MySQL/Redis/Kafka/ClickHouse/MinIO、Docker Compose、CI |
+| P0 基础环境 | ✅ | mall-tiny 3.x、MySQL/Redis/Kafka/ClickHouse、RustFS（S3 兼容）、Docker Compose、CI |
 | P1 SDK + Ingest | ✅ | Error/Performance/API/Breadcrumb、XHR+Fetch、白屏、Web Vitals、统一 Event Protocol、持久化 Batch Queue、指数退避、弱网恢复、Spring Boot 单条/批量 Ingest、Redis 限流、Kafka Producer |
 | P2 Kafka + ClickHouse | ✅ | Kafka Batch Listener、Consumer Group、Retry/DLQ、EventId 幂等、ClickHouse Batch Insert、ReplacingMergeTree、TTL、Materialized View |
 | P3 Dashboard | ✅ | Project 切换、Dashboard 指标/趋势、Issues、Performance、API 页面、ECharts、时间/环境/Release/状态多维筛选 |
@@ -152,7 +152,7 @@ Breadcrumb
 Session Replay
 ```
 
-SourceMap 不公开到 CDN，由 CI 上传到 MinIO 私有桶。
+SourceMap 不公开到 CDN，由 CI 上传到 S3 兼容私有桶（RustFS）。
 
 ### Release
 
@@ -215,8 +215,8 @@ docker compose up -d
 | Redis | localhost:6379 |
 | Kafka | localhost:9092 |
 | ClickHouse HTTP | localhost:8123 |
-| MinIO API | localhost:9002 |
-| MinIO Console | localhost:9001 |
+| S3 API（RustFS，MinIO SDK 兼容） | localhost:9002 |
+| RustFS Console | localhost:9001 |
 
 ### 5.2 服务端
 
@@ -310,7 +310,7 @@ Build
  ↓
 Create Release
  ↓
-Upload *.map → MinIO
+Upload *.map → RustFS/S3
  ↓
 Deploy JS（不上传 .map）
  ↓
@@ -342,6 +342,29 @@ http://localhost:8088
 http://localhost:8080
 ```
 
+所有 Compose 服务（包含 Prometheus、OpenTelemetry Collector 和 Jaeger）使用固定项目名 `monitor-platform`，并带有统一标签 `com.monstereat.observability=true`，可用 Compose 项目或 Docker 标签统一查看和管理。Spring Actuator 在容器内端口 `8081` 暴露健康探针和 Prometheus 指标；部署栈的该端口只绑定宿主机回环地址供 E2E 健康检查，Prometheus 从同一 Compose 网络抓取。OTLP traces 经 Collector 发给 Jaeger；Kafka Producer 使用 Micrometer Observation，batch consumer 为每批消息生成 Consumer span，并关联上游 Kafka trace context。Jaeger 界面地址为 `http://localhost:16686`，当前使用内存存储，容器重启会清空 Trace。
+
+本地 Compose 启动后，如果 Spring Boot 在宿主机运行，使用 `OTEL_SERVICE_NAME=observability-platform OTEL_TRACES_EXPORTER=otlp OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4318/v1/traces` 启动应用即可将 spans 发往 Collector。
+
+### 基础设施端到端冒烟
+
+```bash
+docker compose -f docker-compose.deploy.yml up -d --build
+bash monitor/scripts/e2e-smoke.sh
+```
+
+脚本验证 Error、Performance、Behavior、Replay 从 Ingest 经过 Kafka 后写入 ClickHouse，并通过 Admin API 查询 Dashboard 和 Replay。默认使用初始化数据中的 Demo 项目和本地管理员账号；可通过 `MONITOR_INGEST_KEY`、`MONITOR_ADMIN_USER`、`MONITOR_ADMIN_PASSWORD` 覆盖。
+
+### Ingest 压测
+
+安装 k6 后运行：
+
+```bash
+k6 run -e RATE=50 -e DURATION=1m monitor/scripts/ingest-load.js
+```
+
+脚本输出实际请求延迟和失败率；调整负载前应同步检查项目限流设置和本机基础设施容量。
+
 ## 9. 数据库职责
 
 数据库字段和业务数据后续可以继续扩展，但职责边界固定：
@@ -349,7 +372,7 @@ http://localhost:8080
 - MySQL：用户、权限、Project、Release、Issue、Alert、Replay 索引。
 - ClickHouse：Error / Performance / Behavior / Replay Event 和聚合分析。
 - Redis：鉴权缓存、Rate Limit、幂等、影响用户估算、告警窗口、Cooldown。
-- MinIO：SourceMap、rrweb Replay 大对象。
+- RustFS/S3：SourceMap、rrweb Replay 大对象（Java 服务继续使用 MinIO SDK）。
 
 ## 10. CI
 
@@ -359,15 +382,13 @@ http://localhost:8080
 2. monitor/sdk Build
 3. monitor/demo Build
 4. admin Build
+5. Docker Compose 基础设施 E2E 冒烟（Ingest → Kafka → ClickHouse/RustFS → Admin）
 
 ## 11. 后续可扩展
 
 当前主链路已闭环，后续增强项：
 
-- OpenTelemetry / TraceId 后端链路关联
-- Spring Boot Actuator / Micrometer / Prometheus
-- Log Search / OpenSearch
-- 告警恢复通知和 Silence
+- Kafka Consumer Lag 专项采集、Log Search / OpenSearch
 - 更细的数据权限
 - ClickHouse 更多物化聚合
 - 压测与真实指标

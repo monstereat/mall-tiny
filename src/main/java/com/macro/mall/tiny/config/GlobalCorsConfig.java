@@ -27,6 +27,7 @@ public class GlobalCorsConfig {
         config.setAllowCredentials(true);
         //放行全部原始头信息
         config.addAllowedHeader("*");
+        config.addExposedHeader("traceparent");
         //允许所有请求方法跨域调用
         config.addAllowedMethod("*");
         UrlBasedCorsConfigurationSource source = new UrlBasedCorsConfigurationSource();

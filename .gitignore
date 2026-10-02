@@ -25,6 +25,14 @@ HELP.md
 /.nb-gradle/
 /build/
 
+### JavaScript build artifacts ###
+node_modules/
+**/dist/
+*.tsbuildinfo
+/monitor/demo/test-results/
+/admin/src/**/*.js
+/admin/vite.config.js
+
 ### VS Code ###
 .vscode/
 

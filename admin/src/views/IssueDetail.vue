@@ -128,7 +128,10 @@ watch([() => projects.currentKey, () => route.params.id], load, { immediate: tru
         <h3 style="margin:0">最新错误现场</h3>
         <div>
           <el-button type="primary" :loading="resolvingSource" @click="resolveSource(true)">重新定位源码</el-button>
-          <el-button v-if="latest?.session_id" @click="$router.push('/replays?sessionId=' + latest.session_id)">查看 Replay</el-button>
+          <el-button
+            v-if="latest?.session_id"
+            @click="$router.push({ path: '/replays', query: { sessionId: latest.session_id, errorAt: latest.event_time } })"
+          >查看错误前后 Replay</el-button>
         </div>
       </div>
       <el-descriptions v-if="latest" :column="3" border>
@@ -137,6 +140,7 @@ watch([() => projects.currentKey, () => route.params.id], load, { immediate: tru
         <el-descriptions-item label="Session">{{ latest.session_id || '-' }}</el-descriptions-item>
         <el-descriptions-item label="环境">{{ latest.environment || '-' }}</el-descriptions-item>
         <el-descriptions-item label="Release">{{ latest.release || '-' }}</el-descriptions-item>
+        <el-descriptions-item label="Trace ID">{{ latest.trace_id || '-' }}</el-descriptions-item>
         <el-descriptions-item label="时间">{{ latest.event_time }}</el-descriptions-item>
       </el-descriptions>
 

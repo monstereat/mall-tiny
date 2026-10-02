@@ -63,6 +63,7 @@ export interface IssueEvent {
   release?: string;
   environment?: string;
   page_url?: string;
+  trace_id?: string;
   payload: string;
 }
 
@@ -121,6 +122,30 @@ export interface AlertRecord {
   fingerprint?: string;
   message: string;
   triggeredAt: string;
+  recoveredAt?: string;
+}
+
+export interface AlertSilence {
+  id: string;
+  scope: 'project' | 'rule' | 'issue';
+  ruleId?: number;
+  fingerprint?: string;
+  reason?: string;
+  createdAt: number;
+  expiresAt: number;
+}
+
+export interface AlertDelivery {
+  id: string;
+  ruleId: number;
+  alertRecordId: number;
+  alertStatus: string;
+  status: string;
+  attempts: number;
+  nextAttemptAt: number;
+  createdAt: number;
+  updatedAt: number;
+  lastError?: string;
 }
 
 export interface SourcePosition {
@@ -197,6 +222,21 @@ export const monitorApi = {
     request<AlertRule[]>(projectUrl(projectKey, '/alerts/rules')),
   alertRecords: (projectKey: string) =>
     request<AlertRecord[]>(projectUrl(projectKey, '/alerts/records')),
+  alertDeliveries: (projectKey: string) =>
+    request<AlertDelivery[]>(projectUrl(projectKey, '/alerts/deliveries')),
+  alertSilences: (projectKey: string) =>
+    request<AlertSilence[]>(projectUrl(projectKey, '/alerts/silences')),
+  createAlertSilence: (projectKey: string, payload: {
+    scope: AlertSilence['scope']; ruleId?: number; fingerprint?: string;
+    reason?: string; durationSeconds: number;
+  }) => request<AlertSilence>(projectUrl(projectKey, '/alerts/silences'), {
+    method: 'POST',
+    body: JSON.stringify(payload)
+  }),
+  deleteAlertSilence: (projectKey: string, silenceId: string) =>
+    request<void>(projectUrl(projectKey, `/alerts/silences/${encodeURIComponent(silenceId)}`), {
+      method: 'DELETE'
+    }),
   createAlertRule: (projectKey: string, rule: AlertRule) =>
     request<AlertRule>(projectUrl(projectKey, '/alerts/rules'), {
       method: 'POST',

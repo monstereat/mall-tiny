@@ -12,6 +12,10 @@ async function apiError() {
   await fetch('https://httpstat.us/500');
 }
 
+async function traceApiProbe() {
+  await fetch('http://localhost:8080/admin/info');
+}
+
 function vueError() {
   throw new Error('demo vue click handler error');
 }
@@ -25,6 +29,7 @@ function vueError() {
       <button @click="jsError">JS Error</button>
       <button @click="promiseError">Promise Error</button>
       <button @click="apiError">API 500</button>
+      <button @click="traceApiProbe">API Trace Probe (unauthenticated)</button>
       <button @click="vueError">Vue Error</button>
     </div>
     <label>

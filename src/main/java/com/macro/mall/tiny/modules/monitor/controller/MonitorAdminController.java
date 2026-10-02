@@ -4,6 +4,8 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.macro.mall.tiny.common.api.CommonResult;
 import com.macro.mall.tiny.modules.monitor.dto.AlertRuleRequest;
+import com.macro.mall.tiny.modules.monitor.dto.MonitorAlertSilenceRequest;
+import com.macro.mall.tiny.modules.monitor.dto.MonitorProjectMemberRequest;
 import com.macro.mall.tiny.modules.monitor.dto.SourceMapResolvedPosition;
 import com.macro.mall.tiny.modules.monitor.model.*;
 import com.macro.mall.tiny.modules.monitor.service.*;
@@ -27,6 +29,9 @@ public class MonitorAdminController {
     private final MonitorSourceMapService sourceMapService;
     private final ObjectMapper objectMapper;
     private final MonitorProjectService projectService;
+    private final MonitorProjectAccessService projectAccessService;
+    private final MonitorAlertSilenceService silenceService;
+    private final MonitorAlertDeliveryService deliveryService;
 
     @PostMapping("/projects")
     public CommonResult<com.macro.mall.tiny.modules.monitor.dto.MonitorProjectCredentials> createProject(
@@ -37,13 +42,33 @@ public class MonitorAdminController {
     @PostMapping("/projects/{projectKey}/rotate-keys")
     public CommonResult<com.macro.mall.tiny.modules.monitor.dto.MonitorProjectCredentials> rotateKeys(
             @PathVariable String projectKey) {
-        adminService.requireProject(projectKey);
+        adminService.requireProjectOwner(projectKey);
         return CommonResult.success(projectService.rotateKeys(projectKey));
     }
 
     @GetMapping("/projects")
     public CommonResult<List<MonitorProject>> projects() {
-        return CommonResult.success(queryService.projects());
+        return CommonResult.success(projectAccessService.listProjects());
+    }
+
+    @GetMapping("/projects/{projectKey}/members")
+    public CommonResult<List<MonitorProjectMember>> projectMembers(@PathVariable String projectKey) {
+        return CommonResult.success(projectAccessService.listMembers(projectKey));
+    }
+
+    @PutMapping("/projects/{projectKey}/members")
+    public CommonResult<MonitorProjectMember> updateProjectMember(
+            @PathVariable String projectKey,
+            @Valid @RequestBody MonitorProjectMemberRequest request) {
+        return CommonResult.success(projectAccessService.addOrUpdateMember(projectKey, request));
+    }
+
+    @DeleteMapping("/projects/{projectKey}/members/{adminId}")
+    public CommonResult<Void> removeProjectMember(
+            @PathVariable String projectKey,
+            @PathVariable Long adminId) {
+        projectAccessService.removeMember(projectKey, adminId);
+        return CommonResult.success(null);
     }
 
     @GetMapping("/{projectKey}/dashboard")
@@ -88,7 +113,7 @@ public class MonitorAdminController {
             @PathVariable String projectKey,
             @PathVariable Long issueId,
             @RequestParam String status) {
-        MonitorProject project = adminService.requireProject(projectKey);
+        MonitorProject project = adminService.requireProject(projectKey, true);
         return CommonResult.success(adminService.updateIssueStatus(project, issueId, status));
     }
 
@@ -152,7 +177,7 @@ public class MonitorAdminController {
     public CommonResult<MonitorAlertRule> createAlertRule(
             @PathVariable String projectKey,
             @Valid @RequestBody AlertRuleRequest request) {
-        MonitorProject project = adminService.requireProject(projectKey);
+        MonitorProject project = adminService.requireProject(projectKey, true);
         return CommonResult.success(adminService.createRule(project, request));
     }
 
@@ -161,7 +186,7 @@ public class MonitorAdminController {
             @PathVariable String projectKey,
             @PathVariable Long ruleId,
             @Valid @RequestBody AlertRuleRequest request) {
-        MonitorProject project = adminService.requireProject(projectKey);
+        MonitorProject project = adminService.requireProject(projectKey, true);
         return CommonResult.success(adminService.updateRule(project, ruleId, request));
     }
 
@@ -169,6 +194,35 @@ public class MonitorAdminController {
     public CommonResult<List<MonitorAlertRecord>> alertRecords(@PathVariable String projectKey) {
         MonitorProject project = adminService.requireProject(projectKey);
         return CommonResult.success(queryService.alertRecords(project.getId()));
+    }
+
+    @GetMapping("/{projectKey}/alerts/deliveries")
+    public CommonResult<List<MonitorAlertDelivery>> alertDeliveries(@PathVariable String projectKey) {
+        MonitorProject project = adminService.requireProject(projectKey);
+        return CommonResult.success(deliveryService.list(project.getId()));
+    }
+
+    @GetMapping("/{projectKey}/alerts/silences")
+    public CommonResult<List<MonitorAlertSilence>> alertSilences(@PathVariable String projectKey) {
+        MonitorProject project = adminService.requireProject(projectKey);
+        return CommonResult.success(silenceService.list(project));
+    }
+
+    @PostMapping("/{projectKey}/alerts/silences")
+    public CommonResult<MonitorAlertSilence> createAlertSilence(
+            @PathVariable String projectKey,
+            @Valid @RequestBody MonitorAlertSilenceRequest request) {
+        MonitorProject project = adminService.requireProject(projectKey, true);
+        return CommonResult.success(silenceService.create(project, request));
+    }
+
+    @DeleteMapping("/{projectKey}/alerts/silences/{silenceId}")
+    public CommonResult<Void> deleteAlertSilence(
+            @PathVariable String projectKey,
+            @PathVariable String silenceId) {
+        MonitorProject project = adminService.requireProject(projectKey, true);
+        silenceService.delete(project, silenceId);
+        return CommonResult.success(null);
     }
 
     @GetMapping("/{projectKey}/sourcemap/resolve")

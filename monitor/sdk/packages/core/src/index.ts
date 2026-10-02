@@ -40,6 +40,10 @@ export interface MonitorEventEnvelope {
   data: Record<string, unknown>;
 }
 
+interface QueuedMonitorEvent extends MonitorEventEnvelope {
+  traceparent?: string;
+}
+
 const SDK_VERSION = '0.2.0';
 
 function randomId(): string {
@@ -54,8 +58,19 @@ function clampRate(value: number | undefined): number {
   return Math.max(0, Math.min(1, value));
 }
 
+function matchingTraceparent(value: string | undefined, traceId: string | undefined): string | undefined {
+  const match = value?.trim().match(/^00-([0-9a-f]{32})-([0-9a-f]{16})-([0-9a-f]{2})$/i);
+  if (!match || !traceId
+      || match[1].toLowerCase() !== traceId.toLowerCase()
+      || /^0+$/.test(match[1])
+      || /^0+$/.test(match[2])) {
+    return undefined;
+  }
+  return value?.trim().toLowerCase();
+}
+
 export class MonitorClient {
-  private readonly queue: MonitorEventEnvelope[] = [];
+  private readonly queue: QueuedMonitorEvent[] = [];
   private readonly sessionId: string;
   private userId?: string;
   private timer?: ReturnType<typeof setInterval>;
@@ -80,14 +95,14 @@ export class MonitorClient {
     this.userId = userId;
   }
 
-  capture(input: MonitorEventInput): string | null {
+  capture(input: MonitorEventInput, traceparent?: string): string | null {
     const sampleRate = clampRate(this.options.sampleRate);
     if (input.eventType !== 'ERROR' && Math.random() > sampleRate) {
       return null;
     }
 
     const eventId = randomId();
-    const event: MonitorEventEnvelope = {
+    const event: QueuedMonitorEvent = {
       eventId,
       projectId: this.options.projectId,
       eventType: input.eventType,
@@ -100,7 +115,8 @@ export class MonitorClient {
       sdkVersion: SDK_VERSION,
       traceId: input.traceId,
       device: this.device(),
-      data: input.data
+      data: input.data,
+      traceparent: matchingTraceparent(traceparent, input.traceId)
     };
 
     this.enqueue(event);
@@ -129,11 +145,17 @@ export class MonitorClient {
     });
   }
 
-  captureBehavior(category: string, data: Record<string, unknown> = {}): string | null {
+  captureBehavior(
+    category: string,
+    data: Record<string, unknown> = {},
+    traceId?: string,
+    traceparent?: string
+  ): string | null {
     return this.capture({
       eventType: 'BEHAVIOR',
-      data: { category, ...data }
-    });
+      data: { category, ...data },
+      traceId
+    }, traceparent);
   }
 
   async flush(keepalive = false): Promise<void> {
@@ -146,42 +168,46 @@ export class MonitorClient {
     }
 
     this.flushing = true;
-    const batchSize = Math.max(1, Math.min(100, this.options.batchSize ?? 20));
-    const events = this.queue.splice(0, batchSize);
-    this.persistQueue();
-
     try {
+      const batchSize = Math.max(1, Math.min(100, this.options.batchSize ?? 20));
       const endpoint = this.options.endpoint.replace(/\/$/, '') + '/batch';
-      const response = await fetch(endpoint, {
-        method: 'POST',
-        headers: {
+      while (this.queue.length > 0) {
+        const events = this.takeBatch(batchSize);
+        this.persistQueue();
+        const traceparent = events[0].traceparent;
+        const requestEvents = events.map(({ traceparent: _traceparent, ...event }) => event);
+        const headers: Record<string, string> = {
           'Content-Type': 'application/json',
           'X-Monitor-Key': this.options.ingestKey
-        },
-        body: JSON.stringify({ events }),
-        keepalive
-      });
-      if (!response.ok) {
-        throw new Error(`monitor ingest failed: ${response.status}`);
-      }
+        };
+        if (traceparent) headers.traceparent = traceparent;
 
-      this.retryAttempt = 0;
-      this.clearRetry();
-      this.persistQueue();
+        try {
+          const response = await fetch(endpoint, {
+            method: 'POST',
+            headers,
+            body: JSON.stringify({ events: requestEvents }),
+            keepalive
+          });
+          if (!response.ok) {
+            throw new Error(`monitor ingest failed: ${response.status}`);
+          }
+        } catch (error) {
+          this.queue.unshift(...events);
+          this.trimQueue();
+          this.persistQueue();
+          throw error;
+        }
+
+        this.retryAttempt = 0;
+        this.clearRetry();
+        this.persistQueue();
+      }
     } catch (error) {
-      this.queue.unshift(...events);
-      this.trimQueue();
-      this.persistQueue();
       this.scheduleRetry();
       throw error;
     } finally {
       this.flushing = false;
-    }
-
-    if (this.queue.length >= batchSize) {
-      queueMicrotask(() => {
-        void this.flush().catch(() => undefined);
-      });
     }
   }
 
@@ -210,6 +236,23 @@ export class MonitorClient {
     this.queue.push(event);
     this.trimQueue();
     this.persistQueue();
+  }
+
+  private takeBatch(batchSize: number): QueuedMonitorEvent[] {
+    const traceparent = this.queue[0].traceparent;
+    const batch: QueuedMonitorEvent[] = [];
+    const remaining: QueuedMonitorEvent[] = [];
+
+    for (const event of this.queue) {
+      if (event.traceparent === traceparent && batch.length < batchSize) {
+        batch.push(event);
+      } else {
+        remaining.push(event);
+      }
+    }
+
+    this.queue.splice(0, this.queue.length, ...remaining);
+    return batch;
   }
 
   private trimQueue(): void {
@@ -246,9 +289,14 @@ export class MonitorClient {
     try {
       const raw = localStorage.getItem(this.storageKey());
       if (!raw) return;
-      const events = JSON.parse(raw) as MonitorEventEnvelope[];
+      const events = JSON.parse(raw) as QueuedMonitorEvent[];
       if (!Array.isArray(events)) return;
-      this.queue.push(...events.filter(event => event.projectId === this.options.projectId));
+      this.queue.push(...events
+        .filter(event => event.projectId === this.options.projectId)
+        .map(event => ({
+          ...event,
+          traceparent: matchingTraceparent(event.traceparent, event.traceId)
+        })));
       this.trimQueue();
     } catch {
       // Ignore malformed or inaccessible storage. Monitoring must never break business code.

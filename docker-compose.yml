@@ -1,5 +1,11 @@
+name: monitor-platform
+
+x-monitor-service-labels: &monitor-service-labels
+  com.monstereat.observability: "true"
+
 services:
   mysql:
+    labels: *monitor-service-labels
     image: mysql:8.4
     container_name: monitor-mysql
     restart: unless-stopped
@@ -13,8 +19,15 @@ services:
       - monitor_mysql_data:/var/lib/mysql
       - ./sql/mall_tiny.sql:/docker-entrypoint-initdb.d/01_mall_tiny.sql:ro
       - ./sql/monitor.sql:/docker-entrypoint-initdb.d/02_monitor.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "mysqladmin ping -h 127.0.0.1 -uroot -p$${MYSQL_ROOT_PASSWORD} --silent"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+      start_period: 30s
 
   redis:
+    labels: *monitor-service-labels
     image: redis:7.4
     container_name: monitor-redis
     restart: unless-stopped
@@ -23,8 +36,14 @@ services:
       - "6379:6379"
     volumes:
       - monitor_redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
 
   kafka:
+    labels: *monitor-service-labels
     image: apache/kafka:4.3.1
     container_name: monitor-kafka
     restart: unless-stopped
@@ -32,6 +51,7 @@ services:
       - "9092:9092"
     environment:
       KAFKA_NODE_ID: 1
+      KAFKA_MESSAGE_MAX_BYTES: ${KAFKA_MESSAGE_MAX_BYTES:-10485760}
       KAFKA_PROCESS_ROLES: broker,controller
       KAFKA_LISTENERS: PLAINTEXT://:9092,CONTROLLER://:9093
       KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://localhost:9092
@@ -42,8 +62,15 @@ services:
       KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
       KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
       KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
+    healthcheck:
+      test: ["CMD-SHELL", "/opt/kafka/bin/kafka-topics.sh --bootstrap-server localhost:9092 --list >/dev/null 2>&1"]
+      interval: 10s
+      timeout: 5s
+      retries: 20
+      start_period: 30s
 
   clickhouse:
+    labels: *monitor-service-labels
     image: clickhouse/clickhouse-server:26.8
     container_name: monitor-clickhouse
     restart: unless-stopped
@@ -62,23 +89,106 @@ services:
       nofile:
         soft: 262144
         hard: 262144
+    healthcheck:
+      test: ["CMD-SHELL", "clickhouse-client --user \"$${CLICKHOUSE_USER}\" --password \"$${CLICKHOUSE_PASSWORD}\" --query 'SELECT 1' >/dev/null 2>&1"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+      start_period: 20s
 
   minio:
-    image: minio/minio:latest
+    labels: *monitor-service-labels
+    image: rustfs/rustfs@sha256:41fe89380f4120a337790c02af192c3fe7bb55c3edc2e6e9357b487b47c6ab21
     container_name: monitor-minio
     restart: unless-stopped
-    command: server /data --console-address ":9001"
+    command: ["/data"]
     environment:
-      MINIO_ROOT_USER: monitor
-      MINIO_ROOT_PASSWORD: monitor123456
+      RUSTFS_ACCESS_KEY: monitor
+      RUSTFS_SECRET_KEY: monitor123456
+      RUSTFS_ADDRESS: 0.0.0.0:9000
+      RUSTFS_CONSOLE_ADDRESS: 0.0.0.0:9001
+      RUSTFS_CONSOLE_ENABLE: "true"
     ports:
       - "9002:9000"
       - "9001:9001"
     volumes:
-      - monitor_minio_data:/data
+      - monitor_object_store_data:/data
+    healthcheck:
+      test: ["CMD", "curl", "--fail", "--silent", "http://127.0.0.1:9000/health/ready"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+      start_period: 20s
+
+  prometheus:
+    labels: *monitor-service-labels
+    image: prom/prometheus:v3.14.0
+    container_name: monitor-prometheus
+    restart: unless-stopped
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./infra/prometheus/prometheus-local.yml:/etc/prometheus/prometheus.yml:ro
+      - monitor_prometheus_data:/prometheus
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.path=/prometheus
+      - --storage.tsdb.retention.time=15d
+
+  jaeger:
+    labels: *monitor-service-labels
+    image: jaegertracing/jaeger:2.21.0
+    container_name: monitor-jaeger
+    restart: unless-stopped
+    depends_on:
+      jaeger-storage-init:
+        condition: service_completed_successfully
+    ports:
+      - "127.0.0.1:16686:16686"
+    volumes:
+      - ./infra/jaeger/config.yml:/etc/jaeger/config.yml:ro
+      - monitor_jaeger_data:/badger
+    command:
+      - --config=/etc/jaeger/config.yml
+
+  jaeger-storage-init:
+    labels: *monitor-service-labels
+    image: busybox:1.37.0
+    restart: "no"
+    user: "0:0"
+    volumes:
+      - monitor_jaeger_data:/badger
+    command:
+      - sh
+      - -c
+      - chown 10001:10001 /badger && chmod 0750 /badger
+
+  otel-collector:
+    labels: *monitor-service-labels
+    image: otel/opentelemetry-collector-contrib:0.160.0
+    container_name: monitor-otel-collector
+    restart: unless-stopped
+    depends_on:
+      - jaeger
+    ports:
+      - "127.0.0.1:4318:4318"
+    volumes:
+      - ./infra/otel/collector.yml:/etc/otelcol-contrib/config.yaml:ro
+    command:
+      - --config=/etc/otelcol-contrib/config.yaml
 
 volumes:
   monitor_mysql_data:
   monitor_redis_data:
   monitor_clickhouse_data:
-  monitor_minio_data:
+  monitor_object_store_data:
+  monitor_prometheus_data:
+  monitor_jaeger_data:
+
+networks:
+  default:
+    ipam:
+      config:
+        - subnet: 172.16.64.0/24

@@ -147,7 +147,7 @@ public class MonitorQueryService {
 
     public List<Map<String, Object>> issueEvents(MonitorProject project, MonitorIssue issue, int limit) {
         return clickHouse.queryForList(
-                "SELECT event_id,event_time,session_id,user_id,release,environment,page_url,payload " +
+                "SELECT event_id,event_time,session_id,user_id,release,environment,page_url,trace_id,payload " +
                         "FROM monitor.error_event WHERE project_id=? AND fingerprint=? ORDER BY event_time DESC LIMIT ?",
                 project.getProjectKey(), issue.getFingerprint(), Math.max(1, Math.min(100, limit))
         );
@@ -230,7 +230,7 @@ public class MonitorQueryService {
         if (StringUtils.hasText(sessionId)) {
             query.eq(MonitorReplay::getSessionId, sessionId);
         }
-        return replayMapper.selectList(query.last("LIMIT 100"));
+        return replayMapper.selectList(query.last("LIMIT 1000"));
     }
 
     public MonitorReplay replay(Long projectId, Long replayId) {

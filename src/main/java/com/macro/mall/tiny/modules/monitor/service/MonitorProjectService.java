@@ -27,6 +27,7 @@ public class MonitorProjectService {
     private static final Duration CACHE_TTL = Duration.ofMinutes(10);
 
     private final MonitorProjectMapper projectMapper;
+    private final MonitorProjectAccessService accessService;
     private final StringRedisTemplate redisTemplate;
     private final SecureRandom secureRandom = new SecureRandom();
 
@@ -51,7 +52,10 @@ public class MonitorProjectService {
         project.setIngestKeyHash(sha256(ingestKey));
         project.setReleaseKeyHash(sha256(releaseKey));
         project.setStatus(1);
+        Long ownerId = accessService.currentAdminId();
+        project.setOwnerId(ownerId);
         projectMapper.insert(project);
+        accessService.addOwner(project.getId(), ownerId);
 
         return new MonitorProjectCredentials(project, ingestKey, releaseKey);
     }

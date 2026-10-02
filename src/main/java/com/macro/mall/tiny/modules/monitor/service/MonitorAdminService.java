@@ -16,16 +16,20 @@ import org.springframework.web.server.ResponseStatusException;
 @RequiredArgsConstructor
 public class MonitorAdminService {
 
-    private final MonitorProjectService projectService;
+    private final MonitorProjectAccessService projectAccessService;
     private final MonitorAlertRuleMapper alertRuleMapper;
     private final MonitorIssueMapper issueMapper;
 
     public MonitorProject requireProject(String projectKey) {
-        MonitorProject project = projectService.getActiveProject(projectKey);
-        if (project == null) {
-            throw new ResponseStatusException(HttpStatus.NOT_FOUND, "monitor project not found");
-        }
-        return project;
+        return projectAccessService.requireProject(projectKey, false);
+    }
+
+    public MonitorProject requireProject(String projectKey, boolean write) {
+        return projectAccessService.requireProject(projectKey, write);
+    }
+
+    public MonitorProject requireProjectOwner(String projectKey) {
+        return projectAccessService.requireProjectOwner(projectKey);
     }
 
     @Transactional

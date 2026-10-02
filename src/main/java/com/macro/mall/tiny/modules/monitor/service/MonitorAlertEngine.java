@@ -1,26 +1,25 @@
 package com.macro.mall.tiny.modules.monitor.service;
 
 import com.baomidou.mybatisplus.core.toolkit.Wrappers;
-import com.fasterxml.jackson.databind.ObjectMapper;
 import com.macro.mall.tiny.modules.monitor.domain.MonitorEventType;
 import com.macro.mall.tiny.modules.monitor.dto.MonitorEventEnvelope;
 import com.macro.mall.tiny.modules.monitor.mapper.MonitorAlertRecordMapper;
 import com.macro.mall.tiny.modules.monitor.mapper.MonitorAlertRuleMapper;
+import com.macro.mall.tiny.modules.monitor.mapper.MonitorProjectMapper;
 import com.macro.mall.tiny.modules.monitor.model.MonitorAlertRecord;
 import com.macro.mall.tiny.modules.monitor.model.MonitorAlertRule;
 import com.macro.mall.tiny.modules.monitor.model.MonitorProject;
 import lombok.RequiredArgsConstructor;
 import org.springframework.data.redis.core.StringRedisTemplate;
-import org.springframework.http.MediaType;
+import org.springframework.data.redis.core.ZSetOperations;
+import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Service;
 import org.springframework.util.StringUtils;
-import org.springframework.web.client.RestClient;
 
 import java.math.BigDecimal;
 import java.time.Duration;
 import java.util.Date;
 import java.util.List;
-import java.util.Map;
 import java.util.UUID;
 
 @Service
@@ -29,8 +28,10 @@ public class MonitorAlertEngine {
 
     private final MonitorAlertRuleMapper ruleMapper;
     private final MonitorAlertRecordMapper recordMapper;
+    private final MonitorProjectMapper projectMapper;
+    private final MonitorAlertSilenceService silenceService;
+    private final MonitorAlertDeliveryService deliveryService;
     private final StringRedisTemplate redisTemplate;
-    private final ObjectMapper objectMapper;
 
     public void evaluate(MonitorProject project, MonitorEventEnvelope event, String fingerprint) {
         List<MonitorAlertRule> rules = ruleMapper.selectList(
@@ -39,51 +40,138 @@ public class MonitorAlertEngine {
                         .eq(MonitorAlertRule::getEnabled, 1)
         );
         for (MonitorAlertRule rule : rules) {
-            BigDecimal metricValue = metricValue(project, rule, event);
-            if (metricValue == null || !matches(metricValue, rule.getOperator(), rule.getThresholdValue())) {
-                continue;
-            }
-            if (!acquireCooldown(rule)) {
-                continue;
-            }
-            MonitorAlertRecord record = createRecord(project, rule, metricValue, fingerprint);
-            recordMapper.insert(record);
-            notifyWebhook(rule, record, project);
+            recordObservation(rule, event);
+            evaluateRule(rule, project, fingerprint, System.currentTimeMillis());
         }
     }
 
-    private BigDecimal metricValue(MonitorProject project, MonitorAlertRule rule, MonitorEventEnvelope event) {
-        if ("error_count".equalsIgnoreCase(rule.getMetric()) && event.getEventType() == MonitorEventType.ERROR) {
+    @Scheduled(fixedDelayString = "${monitor.alert.evaluation-interval-ms:1000}")
+    public void evaluateActiveRules() {
+        List<MonitorAlertRule> rules = ruleMapper.selectList(
+                Wrappers.<MonitorAlertRule>lambdaQuery().eq(MonitorAlertRule::getEnabled, 1)
+        );
+        long now = System.currentTimeMillis();
+        for (MonitorAlertRule rule : rules) {
+            MonitorProject project = projectMapper.selectById(rule.getProjectId());
+            if (project != null && Integer.valueOf(1).equals(project.getStatus())) {
+                evaluateRule(rule, project, null, now);
+            }
+        }
+    }
+
+    private void recordObservation(MonitorAlertRule rule, MonitorEventEnvelope event) {
+        if ("error_count".equalsIgnoreCase(rule.getMetric())
+                && event.getEventType() == MonitorEventType.ERROR) {
             int window = Math.max(60, rule.getWindowSeconds() == null ? 300 : rule.getWindowSeconds());
-            long now = event.getTimestamp();
-            String key = "monitor:alert:window:" + project.getId() + ":" + rule.getId();
+            long now = System.currentTimeMillis();
+            String key = windowKey(rule);
             redisTemplate.opsForZSet().add(key, event.getEventId(), now);
             redisTemplate.opsForZSet().removeRangeByScore(key, 0, now - window * 1000L);
             redisTemplate.expire(key, Duration.ofSeconds(window * 2L));
-            Long count = redisTemplate.opsForZSet().zCard(key);
+            return;
+        }
+
+        if (event.getEventType() != MonitorEventType.PERFORMANCE || event.getData() == null) {
+            return;
+        }
+        String metric = String.valueOf(event.getData().getOrDefault("metric", ""));
+        if (!rule.getMetric().equalsIgnoreCase(metric)) {
+            return;
+        }
+        BigDecimal value = decimal(event.getData().get("value"));
+        if (value == null) {
+            return;
+        }
+
+        String key = metricKey(rule);
+        redisTemplate.opsForHash().put(key, "value", value.toPlainString());
+        redisTemplate.opsForHash().put(key, "observedAt", Long.toString(System.currentTimeMillis()));
+        redisTemplate.expire(key, Duration.ofSeconds(Math.max(60,
+                rule.getWindowSeconds() == null ? 300 : rule.getWindowSeconds()) * 2L));
+    }
+
+    private void evaluateRule(MonitorAlertRule rule, MonitorProject project, String fingerprint, long now) {
+        BigDecimal value = currentValue(rule, now);
+        String stateKey = stateKey(rule);
+        String sinceValue = (String) redisTemplate.opsForHash().get(stateKey, "since");
+        String recordIdValue = (String) redisTemplate.opsForHash().get(stateKey, "recordId");
+
+        if (value == null || !matches(value, rule.getOperator(), rule.getThresholdValue())) {
+            if (recordIdValue != null) {
+                recover(rule, project, stateKey, recordIdValue, value);
+            } else {
+                redisTemplate.delete(stateKey);
+            }
+            return;
+        }
+
+        if (sinceValue == null) {
+            redisTemplate.opsForHash().put(stateKey, "since", Long.toString(now));
+            redisTemplate.opsForHash().put(stateKey, "fingerprint", fingerprint == null ? "" : fingerprint);
+            sinceValue = Long.toString(now);
+        }
+        redisTemplate.opsForHash().put(stateKey, "value", value.toPlainString());
+
+        if (recordIdValue != null) {
+            return;
+        }
+        int durationSeconds = Math.max(0, rule.getDurationSeconds() == null ? 0 : rule.getDurationSeconds());
+        if (now - Long.parseLong(sinceValue) < durationSeconds * 1000L) {
+            return;
+        }
+
+        String activeFingerprint = (String) redisTemplate.opsForHash().get(stateKey, "fingerprint");
+        if (silenceService.isSilenced(project.getId(), rule.getId(), activeFingerprint)
+                || !acquireFiringLock(rule)) {
+            return;
+        }
+        try {
+            if (redisTemplate.opsForHash().hasKey(stateKey, "recordId") || !acquireCooldown(rule)) {
+                return;
+            }
+            MonitorAlertRecord record = createRecord(project, rule, value,
+                    StringUtils.hasText(activeFingerprint) ? activeFingerprint : fingerprint);
+            try {
+                recordMapper.insert(record);
+            } catch (RuntimeException e) {
+                int cooldown = Math.max(0,
+                        rule.getCooldownSeconds() == null ? 900 : rule.getCooldownSeconds());
+                if (cooldown > 0) {
+                    redisTemplate.delete(cooldownKey(rule));
+                }
+                throw e;
+            }
+            redisTemplate.opsForHash().put(stateKey, "recordId", record.getId().toString());
+            deliveryService.send(rule, record, project, "firing");
+        } finally {
+            redisTemplate.delete(firingLockKey(rule));
+        }
+    }
+
+    private BigDecimal currentValue(MonitorAlertRule rule, long now) {
+        if ("error_count".equalsIgnoreCase(rule.getMetric())) {
+            int window = Math.max(60, rule.getWindowSeconds() == null ? 300 : rule.getWindowSeconds());
+            ZSetOperations<String, String> zset = redisTemplate.opsForZSet();
+            String key = windowKey(rule);
+            zset.removeRangeByScore(key, 0, now - window * 1000L);
+            Long count = zset.zCard(key);
             return BigDecimal.valueOf(count == null ? 0 : count);
         }
 
-        if (event.getEventType() == MonitorEventType.PERFORMANCE && event.getData() != null) {
-            String metric = String.valueOf(event.getData().getOrDefault("metric", ""));
-            if (rule.getMetric().equalsIgnoreCase(metric)) {
-                Object value = event.getData().get("value");
-                if (value instanceof Number number) {
-                    return BigDecimal.valueOf(number.doubleValue());
-                }
-                if (value != null) {
-                    try {
-                        return new BigDecimal(String.valueOf(value));
-                    } catch (NumberFormatException ignored) {
-                        return null;
-                    }
-                }
-            }
+        String key = metricKey(rule);
+        String observedAt = (String) redisTemplate.opsForHash().get(key, "observedAt");
+        String value = (String) redisTemplate.opsForHash().get(key, "value");
+        int window = Math.max(60, rule.getWindowSeconds() == null ? 300 : rule.getWindowSeconds());
+        if (observedAt == null || value == null || now - Long.parseLong(observedAt) > window * 1000L) {
+            return null;
         }
-        return null;
+        return decimal(value);
     }
 
     private boolean matches(BigDecimal value, String operator, BigDecimal threshold) {
+        if (threshold == null) {
+            return false;
+        }
         int compare = value.compareTo(threshold);
         return switch (operator == null ? ">" : operator.trim()) {
             case ">" -> compare > 0;
@@ -96,10 +184,18 @@ public class MonitorAlertEngine {
     }
 
     private boolean acquireCooldown(MonitorAlertRule rule) {
-        int cooldown = Math.max(60, rule.getCooldownSeconds() == null ? 900 : rule.getCooldownSeconds());
-        String key = "monitor:alert:cooldown:" + rule.getId();
-        Boolean acquired = redisTemplate.opsForValue()
-                .setIfAbsent(key, UUID.randomUUID().toString(), Duration.ofSeconds(cooldown));
+        int cooldown = Math.max(0, rule.getCooldownSeconds() == null ? 900 : rule.getCooldownSeconds());
+        if (cooldown == 0) {
+            return true;
+        }
+        Boolean acquired = redisTemplate.opsForValue().setIfAbsent(
+                cooldownKey(rule), UUID.randomUUID().toString(), Duration.ofSeconds(cooldown));
+        return Boolean.TRUE.equals(acquired);
+    }
+
+    private boolean acquireFiringLock(MonitorAlertRule rule) {
+        Boolean acquired = redisTemplate.opsForValue().setIfAbsent(
+                firingLockKey(rule), UUID.randomUUID().toString(), Duration.ofSeconds(30));
         return Boolean.TRUE.equals(acquired);
     }
 
@@ -123,27 +219,48 @@ public class MonitorAlertEngine {
         return record;
     }
 
-    private void notifyWebhook(MonitorAlertRule rule, MonitorAlertRecord record, MonitorProject project) {
-        if (!StringUtils.hasText(rule.getWebhookUrl())) {
-            return;
+    private void recover(MonitorAlertRule rule, MonitorProject project, String stateKey,
+                         String recordIdValue, BigDecimal recoveredValue) {
+        MonitorAlertRecord record = recordMapper.selectById(Long.parseLong(recordIdValue));
+        if (record != null && "firing".equalsIgnoreCase(record.getStatus())) {
+            record.setStatus("resolved");
+            record.setRecoveredAt(new Date());
+            String value = recoveredValue == null ? "unavailable" : recoveredValue.toPlainString();
+            record.setMessage(record.getMessage() + "; recovered at value=" + value);
+            recordMapper.updateById(record);
+            deliveryService.send(rule, record, project, "resolved");
+        }
+        redisTemplate.delete(stateKey);
+    }
+
+    private BigDecimal decimal(Object value) {
+        if (value == null) {
+            return null;
         }
         try {
-            RestClient.create().post()
-                    .uri(rule.getWebhookUrl())
-                    .contentType(MediaType.APPLICATION_JSON)
-                    .body(Map.of(
-                            "project", project.getProjectKey(),
-                            "rule", rule.getName(),
-                            "level", rule.getLevel(),
-                            "metric", rule.getMetric(),
-                            "value", record.getMetricValue(),
-                            "threshold", record.getThresholdValue(),
-                            "message", record.getMessage()
-                    ))
-                    .retrieve()
-                    .toBodilessEntity();
-        } catch (RuntimeException ignored) {
-            // 告警入库优先，Webhook 失败不回滚消费链路。
+            return new BigDecimal(String.valueOf(value));
+        } catch (NumberFormatException ignored) {
+            return null;
         }
+    }
+
+    private String windowKey(MonitorAlertRule rule) {
+        return "monitor:alert:window:" + rule.getProjectId() + ":" + rule.getId();
+    }
+
+    private String metricKey(MonitorAlertRule rule) {
+        return "monitor:alert:metric:" + rule.getId();
+    }
+
+    private String stateKey(MonitorAlertRule rule) {
+        return "monitor:alert:state:" + rule.getId();
+    }
+
+    private String cooldownKey(MonitorAlertRule rule) {
+        return "monitor:alert:cooldown:" + rule.getId();
+    }
+
+    private String firingLockKey(MonitorAlertRule rule) {
+        return "monitor:alert:firing-lock:" + rule.getId();
     }
 }

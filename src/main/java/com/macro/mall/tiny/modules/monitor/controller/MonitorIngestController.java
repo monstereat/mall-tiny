@@ -6,7 +6,9 @@ import com.macro.mall.tiny.modules.monitor.dto.MonitorEventEnvelope;
 import com.macro.mall.tiny.modules.monitor.service.MonitorIngestService;
 import jakarta.validation.Valid;
 import lombok.RequiredArgsConstructor;
+import org.slf4j.MDC;
 import org.springframework.web.bind.annotation.*;
+import org.springframework.util.StringUtils;
 
 import java.util.Map;
 
@@ -21,6 +23,7 @@ public class MonitorIngestController {
     public CommonResult<Map<String, Object>> ingest(
             @RequestHeader("X-Monitor-Key") String ingestKey,
             @Valid @RequestBody MonitorEventEnvelope event) {
+        attachTraceId(event);
         ingestService.ingest(ingestKey, event);
         return CommonResult.success(Map.of(
                 "accepted", true,
@@ -32,9 +35,16 @@ public class MonitorIngestController {
     public CommonResult<Map<String, Object>> ingestBatch(
             @RequestHeader("X-Monitor-Key") String ingestKey,
             @Valid @RequestBody MonitorEventBatchRequest request) {
+        request.getEvents().forEach(this::attachTraceId);
         int accepted = ingestService.ingestBatch(ingestKey, request.getEvents());
         return CommonResult.success(Map.of(
                 "accepted", accepted
         ));
+    }
+
+    private void attachTraceId(MonitorEventEnvelope event) {
+        if (!StringUtils.hasText(event.getTraceId())) {
+            event.setTraceId(MDC.get("traceId"));
+        }
     }
 }
