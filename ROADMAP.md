@@ -49,7 +49,7 @@
 - [x] 启动并连接本地 Compose 的 ClickHouse、Jaeger、OTel Collector、Prometheus、Server、Admin。
 - [x] 验证基础服务端数据链路：Error / Performance / Behavior / Replay Ingest → Kafka → ClickHouse/RustFS → Admin 查询。
 - [x] 通过真实浏览器验证 SDK 到 Admin 主流程：Vue Error → Issue → SourceMap → Breadcrumb → 错误前后 Replay。SourceMap 定位到 `../../src/App.vue:16:9`、Issue 页面显示源码和 2 条点击 Breadcrumb；1.46 MB SourceMap 上传成功。Issue `/issues/16` 跳转到同一 session 的 `errorAt` Replay，播放后自动滚到 iframe，Demo 内容可见。Alert 管理页另以临时性能规则验证 firing→resolved；该浏览器步骤不覆盖 Vue Error 自动告警，Webhook 成功投递结果见 P7 本地 E2E。
-- [ ] 在 GitHub Actions 复验 CI E2E job（含 LCP firing→resolved）；`verify` 通过，`infrastructure-e2e` 仍在 “Verify browser API and Kafka trace” 失败。本地已改为检查 span 祖先链，三项浏览器 E2E 和完整基础设施/告警 smoke 均通过。`bb085a8` 运行时仍失败；工作流的附件上传步骤成功，但匿名 Actions artifact 查询返回空，当前 Playwright 用例再补全早期断言阶段的诊断输出。
+- [ ] 在 GitHub Actions 复验 CI E2E job（含 LCP firing→resolved）；`verify` 通过，`infrastructure-e2e` 仍在 “Verify browser API and Kafka trace” 失败。本地已改为检查 span 祖先链，三项浏览器 E2E 和完整基础设施/告警 smoke 均通过。`bb085a8` 与 `0598483` 两轮 E2E 仍失败，已定位失败附件目录相对 Playwright 配置路径的偏差；`playwright.config.ts` 现显式设置输出目录，待下一轮确认工件可取并读取失败详情。
 - [ ] 验收 Docker Compose 启动、业务服务连接和一次 Push/Pipeline 到构建、Release、部署、监控的流程。
 - [x] 执行 k6 Ingest 基线：50 req/s、1 分钟、3001 请求；Consumer span 改动后 P95 3.79 ms、错误率 0%，对应 ClickHouse 有 3001 条新增事件，Kafka Consumer Lag 为 0（此前基线 P95 4.12 ms）。附加档位：80 req/s × 1 分钟 4800/4800 成功、P95 3.64 ms；100 req/s 共 6000 次，P95 3.86 ms，但 891 次被当前每项目每分钟 5000 条限流拒绝（14.85%），不是时延阈值失败。100 req/s 采样峰值 Server/Kafka/ClickHouse CPU 约 64%/117%/63%、内存约 751 MiB/973 MiB/1.54 GiB；80 req/s CPU 峰值约 73%/9%/79%，内存约 756 MiB/925 MiB/1.54 GiB。两档后 Kafka Lag 均为 0；对应测试 Release=`load-test` 的 ClickHouse 行数为 15,911（含此前基线）。本机结果不代表生产容量，更高压力和长时资源曲线仍待测。
 
@@ -112,5 +112,5 @@
 - 2026-10-02：项目成员管理 UI 已加入成员查看、邀请/更新 MEMBER/VIEWER 和移除；新增 6 项项目访问权限单测。Admin 构建及定向 Maven 测试通过。
 - 2026-10-02：Replay 元数据按 30 天保留期分批清理；定向 Maven 测试 2 项通过，未执行当前数据库清理。
 - 2026-10-02：`V20261002_02` 在备份当前 `monitor_platform` 后添加 `monitor_replay.create_time` 索引并登记版本；迁移重复执行后仍仅有一条索引和一条版本记录。重建后的 prod Server 健康检查返回 `UP`；完整 `mvn -B test` 13 项通过，包含成员权限与索引清理测试。
-- 2026-10-02：本地单独复跑浏览器 API→Kafka Trace E2E 通过。提交 `bb085a8` 的 GitHub `verify` 成功，E2E 仍在同一浏览器 Trace 步骤失败；workflow 的日志诊断和 artifact 上传步骤均成功但匿名 artifact 列表为空。Playwright 用例现补充 API/Batch/Jaeger 各阶段状态输出，用于下一轮精确定位。
+- 2026-10-02：本地单独复跑浏览器 API→Kafka Trace E2E 通过。GitHub 提交 `bb085a8`、`0598483` 的 `verify` 均成功，E2E 均在浏览器 Trace 步骤失败。排查发现 Playwright 输出目录按 `e2e/playwright.config.ts` 相对路径解析，原 workflow 上传路径未覆盖；现显式固定到 `monitor/demo/test-results`，并补充 API/Batch/Jaeger 各阶段失败诊断，待 CI 再验。
 - 仍待：GitHub Actions 最新提交复验、真实第三方 Webhook、生产部署流水线、对象存储配额、长时/更高容量目标。日志检索后端、Trace/Issue 联查、Tenant/Team 层级、条件数据删除和 AI provider 仍未完成。
