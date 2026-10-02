@@ -73,8 +73,20 @@ jobs:
         run: pnpm exec playwright install --with-deps chromium
 
       - name: Start the monitoring stack and browser demo
+        run: docker compose -p "$COMPOSE_PROJECT_NAME" -f docker-compose.deploy.yml -f monitor/demo/docker-compose.e2e.yml up -d --build
+
+      - name: Run browser end-to-end tests
+        run: pnpm --dir monitor/demo test:e2e:trace
+
+      - name: Run infrastructure smoke tests
+        run: bash monitor/scripts/e2e-smoke.sh
+
+      - name: Capture monitoring diagnostics after failure
+        if: failure()
         run: |
-          trap 'docker compose -p "$COMPOSE_PROJECT_NAME" -f docker-compose.deploy.yml -f monitor/demo/docker-compose.e2e.yml down --remove-orphans' EXIT
-          docker compose -p "$COMPOSE_PROJECT_NAME" -f docker-compose.deploy.yml -f monitor/demo/docker-compose.e2e.yml up -d --build
-          pnpm --dir monitor/demo test:e2e:trace
-          bash monitor/scripts/e2e-smoke.sh
+          docker compose -p "$COMPOSE_PROJECT_NAME" -f docker-compose.deploy.yml -f monitor/demo/docker-compose.e2e.yml ps --all
+          docker compose -p "$COMPOSE_PROJECT_NAME" -f docker-compose.deploy.yml -f monitor/demo/docker-compose.e2e.yml logs --no-color --tail=120 server kafka clickhouse minio jaeger demo
+
+      - name: Stop the monitoring stack
+        if: always()
+        run: docker compose -p "$COMPOSE_PROJECT_NAME" -f docker-compose.deploy.yml -f monitor/demo/docker-compose.e2e.yml down --remove-orphans

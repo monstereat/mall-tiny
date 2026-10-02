@@ -120,7 +120,8 @@ CREATE TABLE IF NOT EXISTS monitor_replay (
   create_time DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
   PRIMARY KEY (id),
   UNIQUE KEY uk_replay_event (event_id),
-  KEY idx_project_session (project_id, session_id)
+  KEY idx_project_session (project_id, session_id),
+  KEY idx_replay_create_time (create_time)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='Session Replay 对象索引';
 
 CREATE TABLE IF NOT EXISTS monitor_alert_record (
@@ -180,3 +181,6 @@ WHERE p.owner_id IS NULL;
 
 INSERT IGNORE INTO monitor_schema_migration (version, description)
 VALUES ('20261002_01', 'monitor project membership and project-scoped access');
+
+INSERT IGNORE INTO monitor_schema_migration (version, description)
+VALUES ('20261002_02', 'monitor replay index retention');
