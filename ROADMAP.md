@@ -24,7 +24,7 @@
 | P2 Kafka + ClickHouse | 完成 | 批量消费、Consumer Group、Retry/DLQ、EventId 幂等、ClickHouse 批量写入、ReplacingMergeTree、TTL 和物化视图 |
 | P3 Dashboard | 完成 | 项目切换、Dashboard、Issues、Performance、API、图表及时间/环境/Release/状态筛选 |
 | P4 Fingerprint + Issue | 完成 | 错误归一化、SHA-256 指纹、Issue 聚合、影响用户统计、First/Last Seen、幂等和自动 reopen |
-| P5 SourceMap + Breadcrumb | 完成 | Release、私有 SourceMap 上传及解析、源码定位与上下文、Breadcrumb 时间线、Issue 到 Replay 关联 |
+| P5 SourceMap + Breadcrumb | 完成 | Release、私有 SourceMap 上传及解析、错误调用栈逐帧还原及源码上下文、Breadcrumb 时间线、Issue 到 Replay 关联 |
 | P6 Session Replay | 基础闭环完成 | rrweb 采集、Kafka、对象存储、Replay 元数据与后台播放器、普通及高风险路径采样配置、SPA 路由动态重选、对象 30 天生命周期、可选的错误前 60 秒/错误后 30 秒缓冲；错误缓冲默认关闭，容量配额与索引治理待办 |
 | P7 Release | 基础闭环完成 | Release 元数据、Release Key、Git 信息及 SourceMap 上传脚本 |
 | P7 Alert | 主功能完成 | Error/性能规则、Redis 滑动窗口、阈值、冷却、告警记录和 Webhook 基础能力 |
@@ -35,7 +35,7 @@
 
 - 本地与部署 Compose 固定为 `monitor-platform` 项目，所有长期服务和 Jaeger 卷初始化服务带统一 `com.monstereat.observability=true` 标签，并共享 `172.16.64.0/24` 默认网络。MySQL、Redis、Kafka、ClickHouse、RustFS 的健康检查通过；Jaeger、OTel Collector、Prometheus、Server、Admin 均运行中。RustFS 为本地 S3 兼容验证替代服务，未改变生产存储路线决策。
 - Actuator 的健康探针、Micrometer Prometheus registry 和独立管理端口 `8081` 已配置；部署栈只把 `8081` 绑定到宿主机回环地址。Prometheus 已抓取应用、Prometheus 自身、HikariCP 和 Kafka Consumer 指标；测试 topic 当前 lag 为 0。两份配置通过 `promtool check config`。
-- 已添加基础设施和真实浏览器 Trace E2E 脚本及 CI job，覆盖 Error、Performance、Behavior、Replay 的 Ingest、Kafka、ClickHouse/RustFS 写入及 Admin 查询，并加入唯一 LCP 规则 firing→resolved API 验收；Performance smoke event 还带随机 W3C `traceparent`，要求 ingest 响应保留 Trace ID，并轮询 Jaeger 验证 HTTP → `monitor-performance-v1 send` → `monitor.kafka.consume` 的祖先链。Playwright 浏览器测试点击 Demo API Trace Probe，核对 API 请求/响应 Trace ID、Behavior batch header/body 和 API → Ingest → Kafka Producer → Consumer 的祖先链。脚本会等待对象存储 readiness，成功或失败退出时都会禁用本次规则，告警记录和合成事件会保留供检查。CI E2E 使用独立的 `monitor-platform-ci-${GITHUB_RUN_ID}` project，Demo 与其他服务共享该 project、默认网络及统一标签，清理命令限定在该 project；固定宿主机端口仍意味着该 Job 不应在已有本地栈的同一 Docker host 并行运行。两次最新 GitHub Actions 的 `verify` 均成功，但 E2E 大步骤仍失败；未登录日志 API 返回 403，无法区分启动、浏览器或 smoke 阶段。已将其拆成独立步骤，并在失败时输出容器状态与核心服务日志；最新 CI 复验待完成。本地三项 Playwright E2E 和完整基础设施/告警 smoke 均通过。
+- 已添加基础设施和真实浏览器 Trace E2E 脚本及 CI job，覆盖 Error、Performance、Behavior、Replay 的 Ingest、Kafka、ClickHouse/RustFS 写入及 Admin 查询，并加入唯一 LCP 规则 firing→resolved API 验收；Performance smoke event 还带随机 W3C `traceparent`，要求 ingest 响应保留 Trace ID，并轮询 Jaeger 验证 HTTP → `monitor-performance-v1 send` → `monitor.kafka.consume` 的祖先链。Playwright 浏览器测试点击 Demo API Trace Probe，核对 API 请求/响应 Trace ID、Behavior batch header/body 和 API → Ingest → Kafka Producer → Consumer 的祖先链。脚本会等待对象存储 readiness，成功或失败退出时都会禁用本次规则，告警记录和合成事件会保留供检查。CI E2E 使用独立的 `monitor-platform-ci-${GITHUB_RUN_ID}` project，Demo 与其他服务共享该 project、默认网络及统一标签，清理命令限定在该 project；固定宿主机端口仍意味着该 Job 不应在已有本地栈的同一 Docker host 并行运行。三次最新 GitHub Actions 的 `verify` 均成功，E2E 均在浏览器步骤失败；未登录日志 API 返回 403。当前 workflow 已将启动、三个独立 Playwright 用例、基础设施 smoke 和清理拆为单独步骤，失败时输出容器日志及 Playwright error context，以定位具体用例。本地三项 Playwright E2E 和完整基础设施/告警 smoke 均通过；新版 CI 复验待完成。
 - 已添加 k6 Ingest 压测脚本；50 req/s × 1 分钟本地基线已通过，具体指标见 P8 和最近验证。
 - Alert 已实现持续时长判定、恢复状态/通知、项目/规则/Issue 静默和带重试的 Webhook 投递记录；本地 API 运行探针已验证持续时长触发与恢复、规则/项目/Issue 静默期间抑制、解除后的恢复触发、静默到期自动恢复，以及失败 Webhook 的重试计数增长。Compose 内网 mock receiver 已成功接收 firing/resolved payload，4 条投递均为 `delivered`；真实第三方接收端尚未配置，投递记录暂存 Redis。E2E 合成 Alert 规则、记录、投递状态、测试事件及唯一测试 Issue 均已定向清理并核验无残留。
 - Replay 已实现 Session 多片段合并、gzip 存储和 Issue 错误前 60 秒/后 30 秒窗口筛选；RustFS 写入、Admin API 解压读取和事件合并排序已通过。浏览器点击播放后自动滚到播放器，Demo 回放内容可见。SDK 的普通/高风险路由采样率默认保持兼容；`pushState`、`replaceState` 和 `popstate` 引发 pathname 变化时会停止并刷新当前片段，再按新路由重新抽样。部署配置在专用 Replay bucket 设置 30 天对象过期，并保留其他 lifecycle rules；运行态回读确认规则启用、bucket 当前未启用版本控制、现存 Replay 对象均不足一天。`retainOnError` 可选保留未采样会话的最近 60 秒并在错误后继续采集 30 秒，默认为关闭；本地浏览器 E2E 验证错误触发上传错误前片段，未启用时不上传。生产 profile 每小时按 30 天保留期分批清理过期 Replay 索引行，单轮限量并有单测；`create_time` 查询索引已加入新装 schema 和版本化迁移，并在当前库备份后应用、重跑确认幂等；存储配额仍待实现。
@@ -75,6 +75,7 @@
 
 - [x] 全链路 Trace：强制采样服务端 HTTP → Kafka Producer → 批次 Consumer spans 在 Jaeger 中处于同一 Trace，Consumer 的 parent 指向 Producer；批次中的其他消息通过 Span links 关联。真实浏览器 Demo 的 API 请求响应 `traceparent` 被关联到 Behavior event，并沿批次 Ingest → Producer → Consumer 延续为同一 Trace。SDK/browser 构建及服务端镜像编译通过；真实 Kafka 混合上下文 batch 已验证一个 Consumer span 的 parent 与 link 分别关联两条独立 Trace。Jaeger Badger 本地存储设 7 天 TTL，并已验证重启持久性。
 - [x] Issue 错误事件 API 返回 Trace ID 字段；Trace 检索和日志后端尚未接入。
+- [x] Issue 详情解析 Chromium/V8 和 Firefox/Safari 常见 stack frame，按 Release 与环境逐帧 SourceMap 还原；未映射帧保留原始位置，已映射帧显示源码上下文。
 - [x] 浏览器验收 Issue 详情页展示实际 Trace ID；Issue 16 显示 `1891daf3c81adb3427f78e2806f2bf20`，并与 Replay Session ID 区分。
 - [x] Spring Boot Actuator/Prometheus 指标抓取：应用、Prometheus 自身 target 均为 `up`；HikariCP 与 Kafka Consumer metrics 已抓取，测试 topic Lag 为 0。
 - [ ] 日志检索与 TraceId、Issue 关联。
@@ -87,6 +88,7 @@
 
 ## 最近验证
 
+- 2026-10-02：SourceMap stack 逐帧还原新增 V8/Gecko stack 解析和 fallback 单测；全量 Maven 测试 15 项通过，Admin `npm run build` 通过；测试上下文在无本地 Redis/MySQL 时记录后台定时任务连接失败日志。`git diff --check` 通过。
 - 2026-10-02：本地 Compose 10 个服务均在 `monitor-platform` 项目、共享默认网络并带 `com.monstereat.observability=true` 标签；基础 Error/Performance/Behavior/Replay 链路、Prometheus 两个 target、HikariCP 与 Kafka Consumer 指标、Jaeger HTTP → Producer → Consumer Trace 均已验证。`bash monitor/scripts/e2e-smoke.sh` 通过。
 - 2026-10-02：Java `prod` profile 与 CI 原样 `mvn -B test` 各 4 项通过；SDK/Demo 和 Admin 构建通过；两份 Compose、Prometheus/OTel/CI 配置、脚本语法与 `git diff --check` 通过。TraceIdFilter 返回的 `traceparent` sampled flag 与当前 span 的 sampled 状态相符，运行态 GET 均返回 200。Issue event API 和浏览器详情页均已显示 Trace ID；Issue 16 的 Trace ID 与 Session ID 已分别核对。GitHub Actions 尚未运行；E2E job 使用独立 Compose project，GitHub runner 与用户本地服务互不影响。
 - 2026-10-02：真实浏览器 Vue 错误已显示 Issue、SourceMap 源码 `../../src/App.vue:16:9` 和 2 条 Breadcrumb；1.46 MB SourceMap 上传成功。Admin 告警页已观察临时规则 firing→resolved 并定向清理合成告警。约 4.46 MB Replay Kafka 消息曾超默认限制，调高 Producer/Broker/Consumer 限制至 10 MB 级后，同一 Session 的 13 个 rrweb 事件可写入和读取。Replay iframe 初始在视口下方；加入自动滚动并重建 Admin 容器后，浏览器从 Issue `/issues/16` 打开带 `errorAt` 的同一 session，点击 8-event 片段自动滚动，错误前后 Demo 内容可见。
@@ -105,7 +107,7 @@
 - 2026-10-02：Jaeger v2.21 改为 Badger 持久卷与 168h spans TTL，BusyBox 初始化服务将卷设为 UID 10001；镜像内 `jaeger validate`、Compose 配置校验通过。生成带固定 TraceId 的服务端 Trace，重启 Jaeger 后仍能通过 Query API 查到；Jaeger Badger 为单节点本地存储。
 - 2026-10-02：添加项目级成员访问控制及 `V20261002_01` 版本迁移。迁移前备份 `monitor_platform`，当前库应用后验证 3 个 OWNER membership、0 个活跃无主项目及迁移版本已登记；新装库 `sql/monitor.sql` 也包含 schema 和管理员回填。服务权限逻辑编译通过，邀请账号需已具备 mall-tiny 监控后台 RBAC。
 - 2026-10-02：Java 17 `mvn -B test` 5 项通过；SDK/Demo workspace build 和 Admin build 通过。一次初始 Maven 测试因默认 `dev` profile 没有本地 MinIO 服务而触发新的生命周期初始化失败；将初始化限定到部署的 `prod` profile 后完整测试通过。
-- 2026-10-02：修正 CI Trace E2E 对 span 直接父子关系的过严假设，改为验证 producer 在 Ingest span 后代链上；同时更新基础设施 smoke 的 Jaeger 断言以支持 Spring Security 插入的 `secured request` span。当前部署栈完整运行时三项 Playwright E2E（真实 API→Ingest→Kafka Trace、错误前 Replay 缓冲启用、默认关闭）全部通过；`monitor/scripts/e2e-smoke.sh` 完整通过，含数据持久化和 Alert firing→resolved。SDK workspace/Demo build 与 shell 语法检查通过。最新代码尚待推送后由 GitHub Actions 复验。
+- 2026-10-02：修正 CI Trace E2E 对 span 直接父子关系的过严假设，改为验证 producer 在 Ingest span 后代链上；同时更新基础设施 smoke 的 Jaeger 断言以支持 Spring Security 插入的 `secured request` span。当前部署栈完整运行时三项 Playwright E2E（真实 API→Ingest→Kafka Trace、错误前 Replay 缓冲启用、默认关闭）全部通过；`monitor/scripts/e2e-smoke.sh` 完整通过，含数据持久化和 Alert firing→resolved。GitHub 上最新 `407075a` 的 `verify` 成功，E2E 在 Playwright 步骤失败；下一提交将逐项运行浏览器用例并输出失败上下文。
 - 2026-10-02：用两条带不同 `traceparent` 的 Behavior 消息写入本地 Kafka 同一 topic；Jaeger 查询确认批次 Consumer span 以 trace A 为 parent、对 trace B 建立 `FOLLOWS_FROM` link，两条事件均落 ClickHouse。
 - 2026-10-02：项目成员管理 UI 已加入成员查看、邀请/更新 MEMBER/VIEWER 和移除；新增 6 项项目访问权限单测。Admin 构建及定向 Maven 测试通过。
 - 2026-10-02：Replay 元数据按 30 天保留期分批清理；定向 Maven 测试 2 项通过，未执行当前数据库清理。

@@ -75,8 +75,14 @@ jobs:
       - name: Start the monitoring stack and browser demo
         run: docker compose -p "$COMPOSE_PROJECT_NAME" -f docker-compose.deploy.yml -f monitor/demo/docker-compose.e2e.yml up -d --build
 
-      - name: Run browser end-to-end tests
-        run: pnpm --dir monitor/demo test:e2e:trace
+      - name: Verify browser API and Kafka trace
+        run: pnpm --dir monitor/demo test:e2e:trace --grep "browser API probe"
+
+      - name: Verify Replay error context capture
+        run: pnpm --dir monitor/demo test:e2e:trace --grep "opted-in unsampled session"
+
+      - name: Verify default Replay sampling
+        run: pnpm --dir monitor/demo test:e2e:trace --grep "without error retention"
 
       - name: Run infrastructure smoke tests
         run: bash monitor/scripts/e2e-smoke.sh
@@ -86,6 +92,12 @@ jobs:
         run: |
           docker compose -p "$COMPOSE_PROJECT_NAME" -f docker-compose.deploy.yml -f monitor/demo/docker-compose.e2e.yml ps --all
           docker compose -p "$COMPOSE_PROJECT_NAME" -f docker-compose.deploy.yml -f monitor/demo/docker-compose.e2e.yml logs --no-color --tail=120 server kafka clickhouse minio jaeger demo
+          for context in monitor/demo/test-results/*/error-context.md; do
+            if [ -f "$context" ]; then
+              echo "===== $context ====="
+              cat "$context"
+            fi
+          done
 
       - name: Stop the monitoring stack
         if: always()
