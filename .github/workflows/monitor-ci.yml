@@ -98,14 +98,15 @@ jobs:
               cat "$context"
             fi
           done
+          find monitor/demo -type f -name '*diagnostics.json' -print -exec cat {} \; || true
 
       - name: Upload Playwright failure attachments
         if: failure()
         uses: actions/upload-artifact@v4
         with:
           name: monitor-playwright-failure-${{ github.run_id }}
-          path: monitor/demo/test-results/**
-          if-no-files-found: ignore
+          path: monitor/demo/**/browser-trace-e2e-diagnostics.json
+          if-no-files-found: warn
           retention-days: 7
 
       - name: Stop the monitoring stack

@@ -1,4 +1,6 @@
 import { expect, test } from '@playwright/test';
+import { dirname } from 'node:path';
+import { mkdir, writeFile } from 'node:fs/promises';
 
 const apiUrl = 'http://localhost:8080/admin/info';
 const batchUrl = 'http://localhost:8080/api/v1/envelope/batch';
@@ -9,6 +11,9 @@ test.afterEach(async ({}, testInfo) => {
   if (testInfo.title.startsWith('browser API probe') && testInfo.status !== testInfo.expectedStatus) {
     const body = JSON.stringify(browserTraceDiagnostics, null, 2);
     console.error(`Browser trace E2E diagnostics:\n${body}`);
+    const outputPath = testInfo.outputPath('browser-trace-e2e-diagnostics.json');
+    await mkdir(dirname(outputPath), { recursive: true });
+    await writeFile(outputPath, body, 'utf8');
     await testInfo.attach('browser-trace-e2e-diagnostics.json', {
       body,
       contentType: 'application/json'
