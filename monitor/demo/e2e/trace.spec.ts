@@ -3,6 +3,18 @@ import { expect, test } from '@playwright/test';
 const apiUrl = 'http://localhost:8080/admin/info';
 const batchUrl = 'http://localhost:8080/api/v1/envelope/batch';
 const jaegerUrl = 'http://localhost:16686';
+let browserTraceDiagnostics: Record<string, unknown> = {};
+
+test.afterEach(async ({}, testInfo) => {
+  if (testInfo.title.startsWith('browser API probe') && testInfo.status !== testInfo.expectedStatus) {
+    const body = JSON.stringify(browserTraceDiagnostics, null, 2);
+    console.error(`Browser trace E2E diagnostics:\n${body}`);
+    await testInfo.attach('browser-trace-e2e-diagnostics.json', {
+      body,
+      contentType: 'application/json'
+    });
+  }
+});
 
 function traceId(traceparent: string): string {
   const match = traceparent.match(/^00-([0-9a-f]{32})-([0-9a-f]{16})-([0-9a-f]{2})$/i);
@@ -11,11 +23,14 @@ function traceId(traceparent: string): string {
 }
 
 test('browser API probe, SDK batch, Kafka producer and consumer share one trace', async ({ page, request }) => {
+  browserTraceDiagnostics = { step: 'wait-for-server-health' };
   await expect.poll(async () => {
     const health = await request.get('http://localhost:8081/actuator/health');
+    browserTraceDiagnostics = { step: 'wait-for-server-health', status: health.status() };
     return health.ok();
   }, { timeout: 120_000, intervals: [1000, 2000, 5000] }).toBe(true);
 
+  browserTraceDiagnostics = { step: 'open-demo' };
   await page.goto('/');
 
   const apiResponsePromise = page.waitForResponse(response => response.url() === apiUrl);
@@ -33,8 +48,10 @@ test('browser API probe, SDK batch, Kafka producer and consumer share one trace'
       return false;
     }
   });
+  browserTraceDiagnostics = { step: 'click-api-probe' };
   await page.getByRole('button', { name: /API Trace Probe/ }).click();
   const apiResponse = await apiResponsePromise;
+  browserTraceDiagnostics = { step: 'check-api-response', status: apiResponse.status(), responseHeaders: await apiResponse.allHeaders(), requestHeaders: await apiResponse.request().allHeaders() };
   expect(apiResponse.ok()).toBeTruthy();
 
   const apiRequestTraceparent = (await apiResponse.request().allHeaders()).traceparent;
@@ -46,6 +63,7 @@ test('browser API probe, SDK batch, Kafka producer and consumer share one trace'
   const batchRequest = await behaviorBatchRequest;
   const batchHeaders = await batchRequest.allHeaders();
   const batchTraceparent = batchHeaders.traceparent;
+  browserTraceDiagnostics = { ...browserTraceDiagnostics, step: 'check-behavior-batch', batchHeaders, apiRequestTraceparent, responseTraceparent };
   expect(batchTraceparent).toBe(responseTraceparent);
 
   const batchBody = batchRequest.postDataJSON() as { events: Array<Record<string, unknown>> };
@@ -55,6 +73,7 @@ test('browser API probe, SDK batch, Kafka producer and consumer share one trace'
       && data?.category === 'api'
       && String(data.url).includes('/admin/info');
   });
+  browserTraceDiagnostics = { ...browserTraceDiagnostics, behaviorEvent, batchEventCount: batchBody.events.length };
   expect(behaviorEvent).toBeTruthy();
   expect(String(behaviorEvent!.traceId).toLowerCase()).toBe(traceId(apiRequestTraceparent!));
   expect(traceId(batchTraceparent!)).toBe(traceId(apiRequestTraceparent!));
@@ -62,10 +81,12 @@ test('browser API probe, SDK batch, Kafka producer and consumer share one trace'
   const expectedTraceId = traceId(apiRequestTraceparent!);
   const responseParentSpanId = responseTraceparent!.split('-')[2].toLowerCase();
   let traceDiagnostics: Record<string, unknown> = { traceId: expectedTraceId };
+  browserTraceDiagnostics = { ...browserTraceDiagnostics, step: 'wait-for-jaeger-trace', traceId: expectedTraceId };
   try {
     await expect.poll(async () => {
       const traceResponse = await request.get(`${jaegerUrl}/api/traces/${expectedTraceId}`);
       traceDiagnostics = { traceId: expectedTraceId, jaegerStatus: traceResponse.status() };
+      browserTraceDiagnostics = { ...browserTraceDiagnostics, ...traceDiagnostics };
       if (!traceResponse.ok()) return false;
       const payload = await traceResponse.json() as {
         data?: Array<{
@@ -80,6 +101,7 @@ test('browser API probe, SDK batch, Kafka producer and consumer share one trace'
       const trace = payload.data?.find(item => item.traceID.toLowerCase() === expectedTraceId);
       if (!trace) {
         traceDiagnostics = { traceId: expectedTraceId, jaegerStatus: traceResponse.status(), returnedTraceIds: payload.data?.map(item => item.traceID) ?? [] };
+        browserTraceDiagnostics = { ...browserTraceDiagnostics, ...traceDiagnostics };
         return false;
       }
       const spans = trace.spans;
@@ -113,9 +135,11 @@ test('browser API probe, SDK batch, Kafka producer and consumer share one trace'
         })),
         matched: { apiProbe: Boolean(apiProbe), batchIngest: Boolean(batchIngest), producer: Boolean(producer), consumer: Boolean(consumer) }
       };
+      browserTraceDiagnostics = { ...browserTraceDiagnostics, ...traceDiagnostics };
       return Boolean(apiProbe && batchIngest && producer && consumer);
     }, { timeout: 60_000, intervals: [500, 1000, 2000] }).toBe(true);
   } catch (error) {
+    browserTraceDiagnostics = { ...browserTraceDiagnostics, failure: String(error) };
     await test.info().attach('jaeger-trace-diagnostics.json', {
       body: JSON.stringify(traceDiagnostics, null, 2),
       contentType: 'application/json'
