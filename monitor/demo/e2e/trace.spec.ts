@@ -61,44 +61,67 @@ test('browser API probe, SDK batch, Kafka producer and consumer share one trace'
 
   const expectedTraceId = traceId(apiRequestTraceparent!);
   const responseParentSpanId = responseTraceparent!.split('-')[2].toLowerCase();
-  await expect.poll(async () => {
-    const traceResponse = await request.get(`${jaegerUrl}/api/traces/${expectedTraceId}`);
-    if (!traceResponse.ok()) return false;
-    const payload = await traceResponse.json() as {
-      data?: Array<{
-        traceID: string;
-        spans: Array<{
-          spanID: string;
-          operationName: string;
-          references?: Array<{ refType: string; spanID: string }>;
+  let traceDiagnostics: Record<string, unknown> = { traceId: expectedTraceId };
+  try {
+    await expect.poll(async () => {
+      const traceResponse = await request.get(`${jaegerUrl}/api/traces/${expectedTraceId}`);
+      traceDiagnostics = { traceId: expectedTraceId, jaegerStatus: traceResponse.status() };
+      if (!traceResponse.ok()) return false;
+      const payload = await traceResponse.json() as {
+        data?: Array<{
+          traceID: string;
+          spans: Array<{
+            spanID: string;
+            operationName: string;
+            references?: Array<{ refType: string; spanID: string }>;
+          }>;
         }>;
-      }>;
-    };
-    const trace = payload.data?.find(item => item.traceID.toLowerCase() === expectedTraceId);
-    if (!trace) return false;
-    const spans = trace.spans;
-    const spanById = new Map(spans.map(span => [span.spanID.toLowerCase(), span]));
-    const hasAncestor = (span: typeof spans[number], ancestorSpanId: string) => {
-      let parentSpanId = span.references?.find(reference => reference.refType === 'CHILD_OF')?.spanID;
-      while (parentSpanId) {
-        if (parentSpanId.toLowerCase() === ancestorSpanId.toLowerCase()) return true;
-        parentSpanId = spanById.get(parentSpanId.toLowerCase())?.references
-          ?.find(reference => reference.refType === 'CHILD_OF')?.spanID;
+      };
+      const trace = payload.data?.find(item => item.traceID.toLowerCase() === expectedTraceId);
+      if (!trace) {
+        traceDiagnostics = { traceId: expectedTraceId, jaegerStatus: traceResponse.status(), returnedTraceIds: payload.data?.map(item => item.traceID) ?? [] };
+        return false;
       }
-      return false;
-    };
-    const apiProbe = spans.find(span => span.operationName === 'http get /admin/info');
-    const batchIngest = spans.find(span => span.operationName === 'http post /api/v1/envelope/batch'
-      && span.references?.some(reference => reference.refType === 'CHILD_OF'
-        && reference.spanID.toLowerCase() === responseParentSpanId));
-    if (!apiProbe || !batchIngest) return false;
-    const producer = spans.find(span => span.operationName === 'monitor-behavior-v1 send'
-      && hasAncestor(span, batchIngest.spanID));
-    if (!producer) return false;
-    return spans.some(span => span.operationName === 'monitor.kafka.consume'
-      && span.references?.some(reference => reference.refType === 'CHILD_OF'
-        && reference.spanID.toLowerCase() === producer.spanID.toLowerCase()));
-  }, { timeout: 60_000, intervals: [500, 1000, 2000] }).toBe(true);
+      const spans = trace.spans;
+      const spanById = new Map(spans.map(span => [span.spanID.toLowerCase(), span]));
+      const hasAncestor = (span: typeof spans[number], ancestorSpanId: string) => {
+        let parentSpanId = span.references?.find(reference => reference.refType === 'CHILD_OF')?.spanID;
+        while (parentSpanId) {
+          if (parentSpanId.toLowerCase() === ancestorSpanId.toLowerCase()) return true;
+          parentSpanId = spanById.get(parentSpanId.toLowerCase())?.references
+            ?.find(reference => reference.refType === 'CHILD_OF')?.spanID;
+        }
+        return false;
+      };
+      const apiProbe = spans.find(span => span.operationName === 'http get /admin/info');
+      const batchIngest = spans.find(span => span.operationName === 'http post /api/v1/envelope/batch'
+        && span.references?.some(reference => reference.refType === 'CHILD_OF'
+          && reference.spanID.toLowerCase() === responseParentSpanId));
+      const producer = batchIngest && spans.find(span => span.operationName === 'monitor-behavior-v1 send'
+        && hasAncestor(span, batchIngest.spanID));
+      const consumer = producer && spans.find(span => span.operationName === 'monitor.kafka.consume'
+        && span.references?.some(reference => reference.refType === 'CHILD_OF'
+          && reference.spanID.toLowerCase() === producer.spanID.toLowerCase()));
+      traceDiagnostics = {
+        traceId: expectedTraceId,
+        jaegerStatus: traceResponse.status(),
+        expectedParentSpanId: responseParentSpanId,
+        spans: spans.map(span => ({
+          operationName: span.operationName,
+          spanId: span.spanID,
+          parents: span.references?.filter(reference => reference.refType === 'CHILD_OF').map(reference => reference.spanID) ?? []
+        })),
+        matched: { apiProbe: Boolean(apiProbe), batchIngest: Boolean(batchIngest), producer: Boolean(producer), consumer: Boolean(consumer) }
+      };
+      return Boolean(apiProbe && batchIngest && producer && consumer);
+    }, { timeout: 60_000, intervals: [500, 1000, 2000] }).toBe(true);
+  } catch (error) {
+    await test.info().attach('jaeger-trace-diagnostics.json', {
+      body: JSON.stringify(traceDiagnostics, null, 2),
+      contentType: 'application/json'
+    });
+    throw error;
+  }
 });
 
 test('opted-in unsampled session uploads pre-error Replay context on error', async ({ page }) => {
