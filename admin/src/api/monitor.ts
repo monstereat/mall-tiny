@@ -14,6 +14,13 @@ export interface ProjectCredentials {
   releaseKey: string;
 }
 
+export interface MonitorProjectMember {
+  id: number;
+  projectId: number;
+  adminId: number;
+  role: 'OWNER' | 'MEMBER' | 'VIEWER';
+}
+
 export interface PerformanceData {
   summary: Array<{ metric: string; avgValue: number; p75: number; p95: number; samples: number }>;
   trend: Array<{ bucket: string; metric: string; value: number }>;
@@ -170,6 +177,17 @@ export const monitorApi = {
   rotateProjectKeys: (projectKey: string) =>
     request<ProjectCredentials>(`/monitor/admin/projects/${encodeURIComponent(projectKey)}/rotate-keys`, {
       method: 'POST'
+    }),
+  projectMembers: (projectKey: string) =>
+    request<MonitorProjectMember[]>(`/monitor/admin/projects/${encodeURIComponent(projectKey)}/members`),
+  saveProjectMember: (projectKey: string, payload: { adminId: number; role: 'MEMBER' | 'VIEWER' }) =>
+    request<MonitorProjectMember>(`/monitor/admin/projects/${encodeURIComponent(projectKey)}/members`, {
+      method: 'PUT',
+      body: JSON.stringify(payload)
+    }),
+  removeProjectMember: (projectKey: string, adminId: number) =>
+    request<void>(`/monitor/admin/projects/${encodeURIComponent(projectKey)}/members/${adminId}`, {
+      method: 'DELETE'
     }),
   dashboard: (projectKey: string, hours = 24, environment = '', release = '') => {
     const query = new URLSearchParams({ hours: String(hours) });

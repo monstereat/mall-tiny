@@ -99,6 +99,9 @@ monitor:
     secret-key: ${MINIO_SECRET_KEY:monitor123456}
     source-map-bucket: ${MINIO_SOURCEMAP_BUCKET:monitor-sourcemaps}
     replay-retention-days: ${MONITOR_REPLAY_RETENTION_DAYS:30}
+    replay-index-cleanup-cron: ${MONITOR_REPLAY_INDEX_CLEANUP_CRON:0 15 * * * *}
+    replay-index-cleanup-batch-size: ${MONITOR_REPLAY_INDEX_CLEANUP_BATCH_SIZE:500}
+    replay-index-cleanup-max-batches: ${MONITOR_REPLAY_INDEX_CLEANUP_MAX_BATCHES:10}
 
 secure:
   ignored:

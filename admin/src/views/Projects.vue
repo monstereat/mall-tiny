@@ -1,13 +1,69 @@
 <script setup lang="ts">
 import { reactive, ref } from 'vue';
 import { ElMessage, ElMessageBox } from 'element-plus';
-import { monitorApi, type ProjectCredentials } from '../api/monitor';
+import { monitorApi, type MonitorProjectMember, type ProjectCredentials } from '../api/monitor';
 import { useProjectStore } from '../stores/project';
 
 const projects = useProjectStore();
 const dialog = ref(false);
 const credentials = ref<ProjectCredentials | null>(null);
 const form = reactive({ name: '', projectKey: '', platform: 'web' });
+const memberDialog = ref(false);
+const memberProjectKey = ref('');
+const members = ref<MonitorProjectMember[]>([]);
+const memberForm = reactive<{ adminId: number | undefined; role: 'MEMBER' | 'VIEWER' }>({ adminId: undefined, role: 'MEMBER' });
+
+async function openMembers(projectKey: string) {
+  try {
+    memberProjectKey.value = projectKey;
+    members.value = await monitorApi.projectMembers(projectKey);
+    memberForm.adminId = undefined;
+    memberForm.role = 'MEMBER';
+    memberDialog.value = true;
+  } catch (e) {
+    ElMessage.error(e instanceof Error ? e.message : '无法读取项目成员');
+  }
+}
+
+async function saveMember() {
+  if (!memberForm.adminId) {
+    ElMessage.warning('请输入已获得监控后台权限的管理员 ID');
+    return;
+  }
+  try {
+    await monitorApi.saveProjectMember(memberProjectKey.value, {
+      adminId: memberForm.adminId,
+      role: memberForm.role
+    });
+    members.value = await monitorApi.projectMembers(memberProjectKey.value);
+    memberForm.adminId = undefined;
+    ElMessage.success('成员权限已保存');
+  } catch (e) {
+    ElMessage.error(e instanceof Error ? e.message : '保存成员权限失败');
+  }
+}
+
+async function updateMemberRole(member: MonitorProjectMember, role: 'MEMBER' | 'VIEWER') {
+  try {
+    await monitorApi.saveProjectMember(memberProjectKey.value, { adminId: member.adminId, role });
+    members.value = await monitorApi.projectMembers(memberProjectKey.value);
+    ElMessage.success('成员角色已更新');
+  } catch (e) {
+    ElMessage.error(e instanceof Error ? e.message : '更新成员角色失败');
+    members.value = await monitorApi.projectMembers(memberProjectKey.value);
+  }
+}
+
+async function removeMember(member: MonitorProjectMember) {
+  try {
+    await ElMessageBox.confirm(`移除管理员 ${member.adminId} 的项目访问权限？`, '移除成员');
+    await monitorApi.removeProjectMember(memberProjectKey.value, member.adminId);
+    members.value = members.value.filter(item => item.adminId !== member.adminId);
+    ElMessage.success('成员已移除');
+  } catch (e) {
+    if (e instanceof Error && e.message) ElMessage.error(e.message);
+  }
+}
 
 async function createProject() {
   try {
@@ -54,9 +110,10 @@ async function rotate(projectKey: string) {
         <el-table-column prop="name" label="项目" />
         <el-table-column prop="projectKey" label="Project Key" min-width="180" />
         <el-table-column prop="platform" label="Platform" width="120" />
-        <el-table-column label="操作" width="180">
+        <el-table-column label="操作" width="250">
           <template #default="{ row }">
             <el-button link type="primary" @click="projects.setCurrent(row.projectKey)">进入</el-button>
+            <el-button link type="primary" @click="openMembers(row.projectKey)">成员管理</el-button>
             <el-button link type="danger" @click="rotate(row.projectKey)">轮换密钥</el-button>
           </template>
         </el-table-column>
@@ -78,6 +135,39 @@ async function rotate(projectKey: string) {
         <el-button @click="dialog=false">取消</el-button>
         <el-button type="primary" @click="createProject">创建</el-button>
       </template>
+    </el-dialog>
+
+    <el-dialog v-model="memberDialog" :title="`项目成员 · ${memberProjectKey}`" width="620px">
+      <el-form inline>
+        <el-form-item label="管理员 ID">
+          <el-input-number v-model="memberForm.adminId" :min="1" :precision="0" placeholder="管理员 ID" />
+        </el-form-item>
+        <el-form-item label="角色">
+          <el-select v-model="memberForm.role" style="width:140px">
+            <el-option label="成员（可写）" value="MEMBER" />
+            <el-option label="查看者（只读）" value="VIEWER" />
+          </el-select>
+        </el-form-item>
+        <el-form-item><el-button type="primary" @click="saveMember">添加/保存</el-button></el-form-item>
+      </el-form>
+      <el-alert type="info" :closable="false" title="仅可邀请已获得 mall-tiny 监控后台 RBAC 权限的启用管理员。" />
+      <el-table :data="members" style="margin-top:14px">
+        <el-table-column prop="adminId" label="管理员 ID" />
+        <el-table-column label="角色" width="200">
+          <template #default="{ row }">
+            <el-tag v-if="row.role === 'OWNER'" type="warning">所有者</el-tag>
+            <el-select v-else :model-value="row.role" @change="(role: 'MEMBER' | 'VIEWER') => updateMemberRole(row, role)">
+              <el-option label="成员（可写）" value="MEMBER" />
+              <el-option label="查看者（只读）" value="VIEWER" />
+            </el-select>
+          </template>
+        </el-table-column>
+        <el-table-column label="操作" width="100">
+          <template #default="{ row }">
+            <el-button v-if="row.role !== 'OWNER'" link type="danger" @click="removeMember(row)">移除</el-button>
+          </template>
+        </el-table-column>
+      </el-table>
     </el-dialog>
   </section>
 </template>
