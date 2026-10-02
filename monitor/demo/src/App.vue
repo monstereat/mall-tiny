@@ -1,4 +1,8 @@
 <script setup lang="ts">
+import { inject } from 'vue';
+
+const replayErrorBufferTest = inject<boolean>('monitorReplayErrorBufferTest', false);
+
 function jsError() {
   const value: any = undefined;
   value.profile.name = 'boom';
@@ -19,6 +23,13 @@ async function traceApiProbe() {
 function vueError() {
   throw new Error('demo vue click handler error');
 }
+
+function replayErrorProbe() {
+  window.dispatchEvent(new ErrorEvent('error', {
+    error: new Error('demo replay error-buffer probe'),
+    message: 'demo replay error-buffer probe'
+  }));
+}
 </script>
 
 <template>
@@ -31,6 +42,7 @@ function vueError() {
       <button @click="apiError">API 500</button>
       <button @click="traceApiProbe">API Trace Probe (unauthenticated)</button>
       <button @click="vueError">Vue Error</button>
+      <button v-if="replayErrorBufferTest" @click="replayErrorProbe">Error Replay Probe</button>
     </div>
     <label>
       Replay 脱敏输入

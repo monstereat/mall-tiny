@@ -119,13 +119,24 @@ wait_for_trace_parent_chain() {
     if jq -e \
       --arg traceId "$trace_id" \
       --arg requestParentSpanId "$request_parent_span_id" \
-      '.data[]? | select(.traceID == $traceId) | .spans as $spans |
+      'def parent_span_id($span):
+         [$span.references[]? | select(.refType == "CHILD_OF") | .spanID] | first // null;
+       def descends_from($spans; $span; $ancestorSpanId):
+         parent_span_id($span) as $parentSpanId |
+         if $parentSpanId == $ancestorSpanId then true
+         elif $parentSpanId == null then false
+         else ([ $spans[] | select(.spanID == $parentSpanId) ] | first) as $parentSpan |
+           if $parentSpan == null then false
+           else descends_from($spans; $parentSpan; $ancestorSpanId)
+           end
+         end;
+       .data[]? | select(.traceID == $traceId) | .spans as $spans |
         [ $spans[] as $http |
           select($http.operationName == "http post /api/v1/envelope" and
             any($http.references[]?; .refType == "CHILD_OF" and .spanID == $requestParentSpanId)) |
           $spans[] as $producer |
           select($producer.operationName == "monitor-performance-v1 send" and
-            any($producer.references[]?; .refType == "CHILD_OF" and .spanID == $http.spanID)) |
+            descends_from($spans; $producer; $http.spanID)) |
           $spans[] |
           select(.operationName == "monitor.kafka.consume" and
             any(.references[]?; .refType == "CHILD_OF" and .spanID == $producer.spanID))

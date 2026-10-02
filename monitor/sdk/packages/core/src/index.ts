@@ -71,6 +71,7 @@ function matchingTraceparent(value: string | undefined, traceId: string | undefi
 
 export class MonitorClient {
   private readonly queue: QueuedMonitorEvent[] = [];
+  private readonly errorListeners = new Set<(input: MonitorEventInput) => void>();
   private readonly sessionId: string;
   private userId?: string;
   private timer?: ReturnType<typeof setInterval>;
@@ -95,9 +96,14 @@ export class MonitorClient {
     this.userId = userId;
   }
 
-  capture(input: MonitorEventInput, traceparent?: string): string | null {
+  onError(listener: (input: MonitorEventInput) => void): () => void {
+    this.errorListeners.add(listener);
+    return () => this.errorListeners.delete(listener);
+  }
+
+  capture(input: MonitorEventInput, traceparent?: string, bypassSampling = false): string | null {
     const sampleRate = clampRate(this.options.sampleRate);
-    if (input.eventType !== 'ERROR' && Math.random() > sampleRate) {
+    if (!bypassSampling && input.eventType !== 'ERROR' && Math.random() > sampleRate) {
       return null;
     }
 
@@ -120,6 +126,15 @@ export class MonitorClient {
     };
 
     this.enqueue(event);
+    if (input.eventType === 'ERROR') {
+      for (const listener of this.errorListeners) {
+        try {
+          listener(input);
+        } catch {
+          // Replay integrations must never break application error reporting.
+        }
+      }
+    }
     if (this.queue.length >= (this.options.batchSize ?? 20)) {
       void this.flush().catch(() => undefined);
     }

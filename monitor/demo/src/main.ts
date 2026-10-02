@@ -5,6 +5,8 @@ import { installVueErrorHandler } from '@observe/vue';
 import { startReplay } from '@observe/replay';
 
 const endpoint = 'http://localhost:8080/api/v1/envelope';
+const replayErrorBufferTest = new URLSearchParams(location.search).get('replayErrorBuffer') === '1';
+const replaySampleRate = new URLSearchParams(location.search).get('replaySampleRate');
 
 const monitor = init({
   endpoint,
@@ -25,11 +27,14 @@ const app = createApp(App);
 installVueErrorHandler(app, monitor.client, () => monitor.breadcrumbs);
 const replay = startReplay(monitor.client, {
   flushInterval: 10000,
-  maskAllInputs: true
+  maskAllInputs: true,
+  sampleRate: replaySampleRate == null ? undefined : Number(replaySampleRate),
+  retainOnError: replayErrorBufferTest
 });
 
 window.addEventListener('beforeunload', () => {
   replay.stop();
 });
 
+app.provide('monitorReplayErrorBufferTest', replayErrorBufferTest);
 app.mount('#app');

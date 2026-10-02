@@ -5,6 +5,8 @@ export interface ReplayOptions {
   flushInterval?: number;
   maxEvents?: number;
   maskAllInputs?: boolean;
+  /** Keep an unsampled session in memory and upload it when an error is captured. Defaults to false. */
+  retainOnError?: boolean;
   /** Sampling rate for sessions outside high-risk routes. Defaults to 1. */
   sampleRate?: number;
   /** Path prefixes that use the high-risk sampling rate while Replay is running. */
@@ -35,10 +37,13 @@ export function startReplay(client: MonitorClient, options: ReplayOptions = {}):
   const normalSampleRate = clampRate(options.sampleRate);
   const events: eventWithTime[] = [];
   const maxEvents = Math.max(50, options.maxEvents ?? 1000);
+  const retainOnError = options.retainOnError ?? false;
   let stopRecording: (() => void) | undefined;
+  let postErrorTimer: number | undefined;
+  let postErrorActive = false;
   let stopped = false;
 
-  const flush = (): void => {
+  const flushBufferedEvents = (bypassSampling = false): void => {
     if (events.length === 0) return;
     const snapshot = events.splice(0, events.length);
     client.capture({
@@ -47,7 +52,16 @@ export function startReplay(client: MonitorClient, options: ReplayOptions = {}):
         format: 'rrweb',
         events: snapshot
       }
-    });
+    }, undefined, bypassSampling);
+  };
+
+  let currentPathname = location.pathname;
+  let sampled = false;
+
+  const trimBuffer = (): void => {
+    const cutoff = Date.now() - 60_000;
+    while (events.length > 0 && events[0].timestamp < cutoff) events.shift();
+    if (events.length > maxEvents) events.splice(0, events.length - maxEvents);
   };
 
   const shouldRecord = (pathname: string): boolean => {
@@ -61,6 +75,7 @@ export function startReplay(client: MonitorClient, options: ReplayOptions = {}):
   const startRecording = (): void => {
     stopRecording = record({
       emit(event) {
+        trimBuffer();
         events.push(event);
         if (events.length > maxEvents) events.splice(0, events.length - maxEvents);
       },
@@ -70,16 +85,31 @@ export function startReplay(client: MonitorClient, options: ReplayOptions = {}):
     });
   };
 
-  let currentPathname = location.pathname;
+  const handleError = (): void => {
+    if (!retainOnError || sampled || stopped || postErrorActive) return;
+    trimBuffer();
+    postErrorActive = true;
+    flushBufferedEvents(true);
+    postErrorTimer = window.setTimeout(() => {
+      postErrorTimer = undefined;
+      flushBufferedEvents(true);
+      postErrorActive = false;
+    }, 30_000);
+  };
+  const unsubscribeError = retainOnError ? client.onError(handleError) : undefined;
+
   const handleRouteChange = (): void => {
     if (stopped || location.pathname === currentPathname) return;
+    const previousSampled = sampled;
     currentPathname = location.pathname;
 
     stopRecording?.();
     stopRecording = undefined;
-    flush();
+    if (previousSampled || postErrorActive) flushBufferedEvents(postErrorActive);
+    else events.splice(0, events.length);
 
-    if (shouldRecord(currentPathname)) startRecording();
+    sampled = shouldRecord(currentPathname);
+    if (sampled || retainOnError) startRecording();
   };
 
   const originalPushState = history.pushState;
@@ -99,21 +129,31 @@ export function startReplay(client: MonitorClient, options: ReplayOptions = {}):
   history.replaceState = wrappedReplaceState;
   window.addEventListener('popstate', handleRouteChange);
 
-  if (shouldRecord(currentPathname)) startRecording();
+  sampled = shouldRecord(currentPathname);
+  if (sampled || retainOnError) startRecording();
 
-  const timer = window.setInterval(flush, options.flushInterval ?? 15000);
+  const timer = window.setInterval(() => {
+    if (sampled || postErrorActive) flushBufferedEvents(postErrorActive);
+  }, options.flushInterval ?? 15000);
   return {
-    flush,
+    flush: flushBufferedEvents,
     stop(): void {
       if (stopped) return;
       stopped = true;
       window.clearInterval(timer);
+      if (postErrorTimer !== undefined) {
+        window.clearTimeout(postErrorTimer);
+        postErrorTimer = undefined;
+      }
+      unsubscribeError?.();
       window.removeEventListener('popstate', handleRouteChange);
       history.pushState = originalPushState;
       history.replaceState = originalReplaceState;
       stopRecording?.();
       stopRecording = undefined;
-      flush();
+      if (sampled || postErrorActive) flushBufferedEvents(postErrorActive);
+      else events.splice(0, events.length);
+      postErrorActive = false;
     }
   };
 }

@@ -77,17 +77,82 @@ test('browser API probe, SDK batch, Kafka producer and consumer share one trace'
     const trace = payload.data?.find(item => item.traceID.toLowerCase() === expectedTraceId);
     if (!trace) return false;
     const spans = trace.spans;
+    const spanById = new Map(spans.map(span => [span.spanID.toLowerCase(), span]));
+    const hasAncestor = (span: typeof spans[number], ancestorSpanId: string) => {
+      let parentSpanId = span.references?.find(reference => reference.refType === 'CHILD_OF')?.spanID;
+      while (parentSpanId) {
+        if (parentSpanId.toLowerCase() === ancestorSpanId.toLowerCase()) return true;
+        parentSpanId = spanById.get(parentSpanId.toLowerCase())?.references
+          ?.find(reference => reference.refType === 'CHILD_OF')?.spanID;
+      }
+      return false;
+    };
     const apiProbe = spans.find(span => span.operationName === 'http get /admin/info');
     const batchIngest = spans.find(span => span.operationName === 'http post /api/v1/envelope/batch'
       && span.references?.some(reference => reference.refType === 'CHILD_OF'
         && reference.spanID.toLowerCase() === responseParentSpanId));
     if (!apiProbe || !batchIngest) return false;
     const producer = spans.find(span => span.operationName === 'monitor-behavior-v1 send'
-      && span.references?.some(reference => reference.refType === 'CHILD_OF'
-        && reference.spanID.toLowerCase() === batchIngest.spanID.toLowerCase()));
+      && hasAncestor(span, batchIngest.spanID));
     if (!producer) return false;
     return spans.some(span => span.operationName === 'monitor.kafka.consume'
       && span.references?.some(reference => reference.refType === 'CHILD_OF'
         && reference.spanID.toLowerCase() === producer.spanID.toLowerCase()));
   }, { timeout: 60_000, intervals: [500, 1000, 2000] }).toBe(true);
+});
+
+test('opted-in unsampled session uploads pre-error Replay context on error', async ({ page }) => {
+  const batches: Array<Array<Record<string, unknown>>> = [];
+  page.on('request', request => {
+    if (request.url() !== batchUrl || request.method() !== 'POST') return;
+    try {
+      const body = request.postDataJSON() as { events?: Array<Record<string, unknown>> };
+      if (body.events) batches.push(body.events);
+    } catch {
+      // Ignore requests without a JSON batch body.
+    }
+  });
+
+  await page.goto('/?replayErrorBuffer=1&replaySampleRate=0');
+  await page.waitForTimeout(2000);
+  const errorTime = await page.evaluate(() => Date.now());
+  await page.getByRole('button', { name: 'Error Replay Probe' }).click();
+
+  await expect.poll(() => batches.flat().some(event => {
+    const data = event.data as Record<string, unknown> | undefined;
+    return event.eventType === 'ERROR' && data?.message === 'demo replay error-buffer probe';
+  }), { timeout: 20_000, intervals: [500, 1000, 2000] }).toBe(true);
+
+  await expect.poll(() => batches.flat().some(event => event.eventType === 'REPLAY'), {
+    timeout: 20_000,
+    intervals: [500, 1000, 2000]
+  }).toBe(true);
+  const replay = batches.flat().find(event => event.eventType === 'REPLAY')!;
+  const replayData = replay.data as { events?: Array<{ timestamp?: number }> };
+  expect(replayData.events?.length).toBeGreaterThan(0);
+  expect(Math.min(...replayData.events!.map(event => event.timestamp ?? errorTime)))
+    .toBeLessThan(errorTime - 1000);
+});
+
+test('unsampled session without error retention does not upload Replay', async ({ page }) => {
+  const batches: Array<Array<Record<string, unknown>>> = [];
+  page.on('request', request => {
+    if (request.url() !== batchUrl || request.method() !== 'POST') return;
+    try {
+      const body = request.postDataJSON() as { events?: Array<Record<string, unknown>> };
+      if (body.events) batches.push(body.events);
+    } catch {
+      // Ignore requests without a JSON batch body.
+    }
+  });
+
+  await page.goto('/?replaySampleRate=0');
+  await page.waitForTimeout(1000);
+  await page.getByRole('button', { name: 'JS Error' }).click();
+  await expect.poll(() => batches.flat().some(event => event.eventType === 'ERROR'), {
+    timeout: 10_000,
+    intervals: [500, 1000, 2000]
+  }).toBe(true);
+  await page.waitForTimeout(4000);
+  expect(batches.flat().some(event => event.eventType === 'REPLAY')).toBe(false);
 });
