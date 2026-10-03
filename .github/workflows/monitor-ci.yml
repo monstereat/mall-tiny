@@ -57,7 +57,7 @@ jobs:
           pnpm build
 
   infrastructure-e2e:
-    if: ${{ github.event_name == 'workflow_dispatch' && inputs.run_infrastructure_e2e }}
+    if: ${{ (github.event_name == 'workflow_dispatch' && inputs.run_infrastructure_e2e) || github.event_name == 'pull_request' }}
     runs-on: ubuntu-latest
     timeout-minutes: 25
     env:
