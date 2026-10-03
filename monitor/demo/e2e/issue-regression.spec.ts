@@ -6,6 +6,8 @@ const serverUrl = 'http://localhost:8080';
 const releaseHealthServerUrl = process.env.RELEASE_HEALTH_SERVER_URL ?? serverUrl;
 const batchUrl = `${serverUrl}/api/v1/envelope/batch`;
 
+test.describe.configure({ retries: 0 });
+
 type MonitorIssue = {
   id: number;
   fingerprint: string;
@@ -160,12 +162,18 @@ test('a real browser error reopens a resolved Issue as a regression without assi
     await expect.poll(async () => {
       const response = await request.get(`${serverUrl}/monitor/admin/demo-web/data-deletion/${previewBody.data.id}`, { headers });
       if (!response.ok()) return null;
-      const body = await response.json() as { data: { status: string; stage?: string } };
+      const body = await response.json() as { data: { status: string; stage?: string; leaseUntil?: string | null } };
+      const leaseRemainingMs = body.data.leaseUntil ? Date.parse(body.data.leaseUntil) - Date.now() : null;
       lastDeletionStatus = {
         jobId: previewBody.data.id,
         status: body.data.status,
-        stage: body.data.stage
+        stage: body.data.stage,
+        leaseUntil: body.data.leaseUntil ?? null,
+        leaseRemainingMs
       };
+      if (body.data.stage === 'LOKI_DELETE_DISCOVER' && leaseRemainingMs !== null) {
+        expect(leaseRemainingMs, 'E2E config applies the short Loki polling lease').toBeLessThanOrEqual(60_000);
+      }
       return body.data.status;
     }, { timeout: 90_000, intervals: [1000, 2000, 5000] }).toBe('COMPLETED');
   };

@@ -136,6 +136,9 @@ jobs:
         run: |
           docker compose -p "$COMPOSE_PROJECT_NAME" -f docker-compose.deploy.yml -f monitor/demo/docker-compose.e2e.yml ps --all
           docker compose -p "$COMPOSE_PROJECT_NAME" -f docker-compose.deploy.yml -f monitor/demo/docker-compose.e2e.yml logs --no-color --tail=120 server kafka clickhouse minio jaeger prometheus alertmanager e2e-alert-receiver demo
+          docker compose -p "$COMPOSE_PROJECT_NAME" -f docker-compose.deploy.yml -f monitor/demo/docker-compose.e2e.yml logs --no-color --tail=120 loki
+          docker compose -p "$COMPOSE_PROJECT_NAME" -f docker-compose.deploy.yml -f monitor/demo/docker-compose.e2e.yml exec -T server printenv MONITOR_DATA_DELETION_LOKI_POLL_DELAY_MS || true
+          docker compose -p "$COMPOSE_PROJECT_NAME" -f docker-compose.deploy.yml -f monitor/demo/docker-compose.e2e.yml exec -T e2e-alert-receiver python -c 'import hashlib,json,urllib.request; rows=json.load(urllib.request.urlopen("http://loki:3100/loki/api/v1/delete",timeout=5)); print(json.dumps([{"request_id":r.get("request_id"),"status":r.get("status"),"start_time":r.get("start_time"),"end_time":r.get("end_time"),"query_sha256":hashlib.sha256(str(r.get("query","")).encode()).hexdigest()[:16]} for r in rows[-20:]]))' || true
           for context in monitor/demo/test-results/*/error-context.md; do
             if [ -f "$context" ]; then
               echo "===== $context ====="
