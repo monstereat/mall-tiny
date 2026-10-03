@@ -162,12 +162,26 @@ test('a real browser error reopens a resolved Issue as a regression without assi
     await expect.poll(async () => {
       const response = await request.get(`${serverUrl}/monitor/admin/demo-web/data-deletion/${previewBody.data.id}`, { headers });
       if (!response.ok()) return null;
-      const body = await response.json() as { data: { status: string; stage?: string; leaseUntil?: string | null } };
+      const body = await response.json() as { data: {
+        status: string;
+        stage?: string;
+        leaseUntil?: string | null;
+        rangeStart?: string;
+        rangeEnd?: string;
+        startedAt?: string | null;
+        createTime?: string;
+        updateTime?: string;
+      } };
       const leaseRemainingMs = body.data.leaseUntil ? Date.parse(body.data.leaseUntil) - Date.now() : null;
       lastDeletionStatus = {
         jobId: previewBody.data.id,
         status: body.data.status,
         stage: body.data.stage,
+        rangeStart: body.data.rangeStart,
+        rangeEnd: body.data.rangeEnd,
+        startedAt: body.data.startedAt ?? null,
+        createTime: body.data.createTime,
+        updateTime: body.data.updateTime,
         leaseUntil: body.data.leaseUntil ?? null,
         leaseRemainingMs
       };
