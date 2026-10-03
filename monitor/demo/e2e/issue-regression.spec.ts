@@ -1,4 +1,6 @@
 import { expect, test, type Request } from '@playwright/test';
+import { dirname } from 'node:path';
+import { mkdir, writeFile } from 'node:fs/promises';
 
 const serverUrl = 'http://localhost:8080';
 const releaseHealthServerUrl = process.env.RELEASE_HEALTH_SERVER_URL ?? serverUrl;
@@ -43,14 +45,16 @@ test('a real browser error reopens a resolved Issue as a regression without assi
   const issueListUrl = `${serverUrl}/monitor/admin/demo-web/issues?pageNum=1&pageSize=100&hours=720&release=${encodeURIComponent(release)}`;
   const releaseHealthUrl = `${releaseHealthServerUrl}/monitor/admin/demo-web/release-health?hours=168`;
   const eventTimes: number[] = [];
+  const observedErrors: Array<Record<string, unknown>> = [];
+  let lastReleaseHealth: Record<string, unknown> | null = null;
 
-  const observeError = () => page.waitForRequest(candidate => {
+  const observeError = (message = errorMessage) => page.waitForRequest(candidate => {
     if (candidate.url() !== batchUrl || candidate.method() !== 'POST') return false;
     try {
       const body = candidate.postDataJSON() as { events?: Array<Record<string, unknown>> };
       return body.events?.some(event => {
         const data = event.data as Record<string, unknown> | undefined;
-        return event.eventType === 'ERROR' && data?.message === errorMessage;
+        return event.eventType === 'ERROR' && data?.message === message;
       }) ?? false;
     } catch {
       return false;
@@ -66,18 +70,54 @@ test('a real browser error reopens a resolved Issue as a regression without assi
 
   const fetchReleaseHealth = async (): Promise<MonitorReleaseHealth | null> => {
     const response = await request.get(releaseHealthUrl, { headers });
-    if (!response.ok()) return null;
+    if (!response.ok()) {
+      lastReleaseHealth = { status: response.status() };
+      return null;
+    }
     const body = await response.json() as { data: MonitorReleaseHealth[] };
-    return body.data.find(row => row.release === release && row.environment === 'development') ?? null;
+    const matchingRows = body.data.filter(row => row.release === release && row.environment === 'development');
+    lastReleaseHealth = { status: response.status(), matchingRows };
+    return matchingRows[0] ?? null;
   };
 
-  const recordEventTime = (browserRequest: Request) => {
+  const recordEventTime = async (browserRequest: Request, expectedUnhandled?: boolean) => {
     const body = browserRequest.postDataJSON() as {
-      events: Array<{ eventType: string; timestamp: number; data?: { message?: string } }>;
+      events: Array<{
+        eventId: string;
+        eventType: string;
+        timestamp: number;
+        sessionId: string;
+        release?: string;
+        environment: string;
+        data?: { name?: string; message?: string; mechanism?: string; unhandled?: boolean };
+      }>;
     };
     const errorEvent = body.events.find(event => event.eventType === 'ERROR' && event.data?.message === errorMessage);
     expect(errorEvent).toBeTruthy();
+    if (expectedUnhandled !== undefined) {
+      expect(errorEvent!.data?.unhandled).toBe(expectedUnhandled);
+    }
     eventTimes.push(errorEvent!.timestamp);
+    const response = await browserRequest.response();
+    expect(response, 'telemetry batch receives an ingest response').not.toBeNull();
+    observedErrors.push({
+      event: {
+        eventId: errorEvent!.eventId,
+        timestamp: errorEvent!.timestamp,
+        sessionId: errorEvent!.sessionId,
+        release: errorEvent!.release,
+        environment: errorEvent!.environment,
+        data: {
+          name: errorEvent!.data?.name,
+          message: errorEvent!.data?.message,
+          mechanism: errorEvent!.data?.mechanism,
+          unhandled: errorEvent!.data?.unhandled
+        }
+      },
+      batchSize: body.events.length,
+      ingestStatus: response!.status()
+    });
+    expect(response!.ok(), 'telemetry batch is accepted by ingest').toBeTruthy();
   };
 
   const deleteRunData = async () => {
@@ -125,7 +165,7 @@ test('a real browser error reopens a resolved Issue as a regression without assi
     await page.waitForTimeout(1000);
     let browserEvent = observeError();
     await page.getByRole('button', { name: 'JS Error' }).click();
-    recordEventTime(await browserEvent);
+    await recordEventTime(await browserEvent);
 
     await expect.poll(async () => {
       issue = await fetchIssue();
@@ -144,7 +184,7 @@ test('a real browser error reopens a resolved Issue as a regression without assi
 
     browserEvent = observeError();
     await page.getByRole('button', { name: 'JS Error' }).click();
-    recordEventTime(await browserEvent);
+    await recordEventTime(await browserEvent);
     await expect.poll(async () => {
       issue = await fetchIssue();
       return issue?.regressedAt ?? null;
@@ -152,6 +192,15 @@ test('a real browser error reopens a resolved Issue as a regression without assi
     expect(issue?.status).toBe('unresolved');
     expect(issue?.eventCount).toBeGreaterThanOrEqual(2);
     expect(issue?.regressedAt).toBeTruthy();
+
+    for (let index = 0; index < 2; index += 1) {
+      browserEvent = observeError();
+      await page.evaluate(message => window.dispatchEvent(new ErrorEvent('error', {
+        error: new Error(message),
+        message
+      })), errorMessage);
+      await recordEventTime(await browserEvent, true);
+    }
 
     await expect.poll(async () => (await fetchReleaseHealth())?.unhandledErrors ?? 0,
       { timeout: 60_000, intervals: [500, 1000, 2000] }).toBeGreaterThanOrEqual(2);
@@ -167,6 +216,56 @@ test('a real browser error reopens a resolved Issue as a regression without assi
     await expect.poll(async () => (await fetchIssue())?.id ?? null, { timeout: 30_000 }).toBeNull();
     await expect.poll(async () => (await fetchReleaseHealth())?.sessions ?? 0, { timeout: 30_000 }).toBe(0);
     cleanupComplete = true;
+  } catch (error) {
+    let issueEvents: Array<Record<string, unknown>> = [];
+    if (issue) {
+      try {
+        const detailResponse = await request.get(`${serverUrl}/monitor/admin/demo-web/issues/${issue.id}?eventLimit=50`, { headers });
+        const detailBody = detailResponse.ok()
+          ? await detailResponse.json() as { data?: { events?: Array<Record<string, unknown>> } }
+          : null;
+        issueEvents = (detailBody?.data?.events ?? []).map(event => {
+          let payload: Record<string, unknown> = {};
+          try {
+            const raw = event.payload;
+            payload = typeof raw === 'string' ? JSON.parse(raw) as Record<string, unknown> : raw as Record<string, unknown>;
+          } catch {
+            // Preserve a compact record if a stored payload cannot be decoded.
+          }
+          const data = payload.data as Record<string, unknown> | undefined;
+          return {
+            eventId: event.event_id,
+            eventTime: event.event_time,
+            release: event.release,
+            environment: event.environment,
+            message: data?.message,
+            mechanism: data?.mechanism,
+            unhandled: data?.unhandled
+          };
+        });
+      } catch (diagnosticError) {
+        issueEvents = [{ diagnosticError: diagnosticError instanceof Error ? diagnosticError.message : String(diagnosticError) }];
+      }
+    }
+    const diagnostics = {
+      runId,
+      release,
+      userId,
+      issue,
+      observedErrors,
+      issueEvents,
+      lastReleaseHealth,
+      failure: error instanceof Error ? error.message : String(error)
+    };
+    const diagnosticBody = JSON.stringify(diagnostics, null, 2);
+    await test.info().attach('release-health-e2e-diagnostics.json', {
+      body: diagnosticBody,
+      contentType: 'application/json'
+    });
+    const outputPath = test.info().outputPath('release-health-e2e-diagnostics.json');
+    await mkdir(dirname(outputPath), { recursive: true });
+    await writeFile(outputPath, diagnosticBody, 'utf8');
+    throw error;
   } finally {
     if (!cleanupComplete) await deleteRunData();
   }

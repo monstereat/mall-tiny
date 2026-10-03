@@ -136,7 +136,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: monitor-playwright-failure-${{ github.run_id }}
-          path: monitor/demo/**/browser-trace-e2e-diagnostics.json
+          path: monitor/demo/**/*-diagnostics.json
           if-no-files-found: warn
           retention-days: 7
 
