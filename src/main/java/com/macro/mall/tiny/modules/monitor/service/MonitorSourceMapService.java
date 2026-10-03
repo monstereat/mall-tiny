@@ -2,6 +2,7 @@ package com.macro.mall.tiny.modules.monitor.service;
 
 import com.baomidou.mybatisplus.core.toolkit.Wrappers;
 import com.macro.mall.tiny.modules.monitor.dto.SourceMapResolvedPosition;
+import com.macro.mall.tiny.modules.monitor.dto.SourceMapStackFrame;
 import com.macro.mall.tiny.modules.monitor.mapper.MonitorSourceMapMapper;
 import com.macro.mall.tiny.modules.monitor.model.MonitorProject;
 import com.macro.mall.tiny.modules.monitor.model.MonitorRelease;
@@ -20,6 +21,10 @@ import java.io.ByteArrayInputStream;
 import java.io.InputStream;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
+import java.util.ArrayList;
+import java.util.HashMap;
+import java.util.List;
+import java.util.Map;
 import java.util.Optional;
 
 @Service
@@ -30,6 +35,7 @@ public class MonitorSourceMapService {
     private final MonitorReleaseService releaseService;
     private final MonitorSourceMapMapper sourceMapMapper;
     private final SourceMapV3Resolver resolver;
+    private final SourceMapStackTraceParser stackTraceParser;
     private final MinioClient minioClient;
     private final MinioBucketService bucketService;
 
@@ -108,6 +114,77 @@ public class MonitorSourceMapService {
             int line,
             int column) {
         return resolveInternal(project, version, environment, bundleFile, line, column);
+    }
+
+    public List<SourceMapStackFrame> resolveStackForAdmin(
+            MonitorProject project,
+            String version,
+            String environment,
+            String stack,
+            String fallbackFile,
+            Integer fallbackLine,
+            Integer fallbackColumn) {
+        MonitorRelease release = releaseService.require(project.getId(), version, environment);
+        List<SourceMapStackTraceParser.Frame> frames =
+                stackTraceParser.parse(stack, fallbackFile, fallbackLine, fallbackColumn);
+        Map<String, Optional<MonitorSourceMap>> sourceMaps = new HashMap<>();
+        Map<String, byte[]> sourceMapContents = new HashMap<>();
+        List<SourceMapStackFrame> results = new ArrayList<>(frames.size());
+
+        for (SourceMapStackTraceParser.Frame frame : frames) {
+            String bundleFile = bundleFile(frame.file());
+            Optional<MonitorSourceMap> sourceMap = sourceMaps.computeIfAbsent(bundleFile, name ->
+                    Optional.ofNullable(sourceMapMapper.selectOne(
+                            Wrappers.<MonitorSourceMap>lambdaQuery()
+                                    .eq(MonitorSourceMap::getReleaseId, release.getId())
+                                    .eq(MonitorSourceMap::getBundleFile, name)
+                                    .last("LIMIT 1")
+                    ))
+            );
+            SourceMapResolvedPosition position = sourceMap
+                    .map(map -> resolveFrame(map, sourceMapContents, frame))
+                    .orElse(null);
+            results.add(new SourceMapStackFrame(
+                    frame.index(),
+                    frame.function(),
+                    frame.raw(),
+                    frame.file(),
+                    frame.line(),
+                    frame.column(),
+                    position != null,
+                    position == null ? null : position.source(),
+                    position == null ? null : position.line(),
+                    position == null ? null : position.column(),
+                    position == null ? null : position.name(),
+                    position == null ? null : position.sourceContent()
+            ));
+        }
+        return results;
+    }
+
+    private SourceMapResolvedPosition resolveFrame(
+            MonitorSourceMap sourceMap,
+            Map<String, byte[]> sourceMapContents,
+            SourceMapStackTraceParser.Frame frame) {
+        byte[] contents = sourceMapContents.computeIfAbsent(sourceMap.getObjectKey(), key -> readSourceMap(sourceMap));
+        return resolver.resolve(contents, frame.line(), frame.column()).orElse(null);
+    }
+
+    private byte[] readSourceMap(MonitorSourceMap sourceMap) {
+        try (InputStream input = minioClient.getObject(
+                GetObjectArgs.builder()
+                        .bucket(sourceMapBucket)
+                        .object(sourceMap.getObjectKey())
+                        .build())) {
+            return input.readAllBytes();
+        } catch (Exception e) {
+            throw new IllegalStateException("source map resolve failed", e);
+        }
+    }
+
+    private String bundleFile(String generatedFile) {
+        String normalized = generatedFile.replace('\\', '/');
+        return normalized.substring(normalized.lastIndexOf('/') + 1);
     }
 
     private Optional<SourceMapResolvedPosition> resolveInternal(

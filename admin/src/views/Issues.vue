@@ -8,6 +8,7 @@ import { useProjectStore } from '../stores/project';
 const projects = useProjectStore();
 const router = useRouter();
 const rows = ref<MonitorIssue[]>([]);
+const selected = ref<MonitorIssue[]>([]);
 const releases = ref<MonitorRelease[]>([]);
 const total = ref(0);
 const page = ref(1);
@@ -16,6 +17,7 @@ const status = ref('');
 const hours = ref(720);
 const release = ref('');
 const loading = ref(false);
+const bulkUpdating = ref(false);
 
 async function load() {
   if (!projects.currentKey) return;
@@ -60,6 +62,29 @@ function changePage(value: number) {
   void load();
 }
 
+function trend(row: MonitorIssue) {
+  return row.eventsLast24h - row.eventsPrevious24h;
+}
+
+async function updateSelected(status: 'resolved' | 'ignored') {
+  if (!projects.currentKey || !selected.value.length) return;
+  bulkUpdating.value = true;
+  try {
+    const changed = await monitorApi.updateIssuesStatus(
+      projects.currentKey,
+      selected.value.map(issue => issue.id),
+      status
+    );
+    ElMessage.success(`已更新 ${changed} 个 Issue`);
+    selected.value = [];
+    await load();
+  } catch (error) {
+    ElMessage.error(error instanceof Error ? error.message : '批量更新失败');
+  } finally {
+    bulkUpdating.value = false;
+  }
+}
+
 watch(() => projects.currentKey, async () => {
   page.value = 1;
   await loadReleases();
@@ -92,13 +117,29 @@ watch([status, hours, release], () => {
         </el-select>
       </div>
       <el-button @click="load">刷新</el-button>
+      <el-button v-if="selected.length" type="success" :loading="bulkUpdating" @click="updateSelected('resolved')">解决 {{ selected.length }} 项</el-button>
+      <el-button v-if="selected.length" type="warning" :loading="bulkUpdating" @click="updateSelected('ignored')">忽略 {{ selected.length }} 项</el-button>
     </div>
 
     <div class="panel">
-      <el-table v-loading="loading" :data="rows" @row-click="openIssue">
-        <el-table-column prop="title" label="Issue" min-width="320" show-overflow-tooltip />
+      <el-table v-loading="loading" :data="rows" @selection-change="selected = $event" @row-click="openIssue">
+        <el-table-column type="selection" width="48" :selectable="() => !bulkUpdating" />
+        <el-table-column prop="title" label="Issue" min-width="320">
+          <template #default="{ row }">
+            <span>{{ row.title }}</span>
+            <el-tag v-if="row.newIssue" size="small" type="success" style="margin-left:8px">新发</el-tag>
+            <el-tag v-if="row.status === 'unresolved' && row.regressedAt" size="small" type="warning" style="margin-left:6px">回归</el-tag>
+          </template>
+        </el-table-column>
         <el-table-column prop="eventCount" label="次数" width="90" />
         <el-table-column prop="affectedUsers" label="影响用户" width="110" />
+        <el-table-column label="近24h / 前24h" width="155">
+          <template #default="{ row }">
+            <span>{{ row.eventsLast24h }} / {{ row.eventsPrevious24h }}</span>
+            <el-tag v-if="trend(row) > 0" size="small" type="danger" style="margin-left:6px">+{{ trend(row) }}</el-tag>
+            <el-tag v-else-if="trend(row) < 0" size="small" type="success" style="margin-left:6px">{{ trend(row) }}</el-tag>
+          </template>
+        </el-table-column>
         <el-table-column prop="latestRelease" label="Release" width="140" />
         <el-table-column prop="status" label="状态" width="100" />
         <el-table-column prop="lastSeen" label="最近发生" width="190" />

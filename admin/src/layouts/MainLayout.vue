@@ -25,12 +25,20 @@ function logout() {
       <el-menu router :default-active="$route.path" class="menu">
         <el-menu-item index="/dashboard">Dashboard</el-menu-item>
         <el-menu-item index="/projects">Projects</el-menu-item>
+        <el-menu-item index="/organization">Organization</el-menu-item>
+        <el-menu-item index="/data-governance">Data Governance</el-menu-item>
         <el-menu-item index="/performance">Performance</el-menu-item>
+        <el-menu-item index="/metrics">Metrics</el-menu-item>
+        <el-menu-item index="/profiles">Profiling</el-menu-item>
+        <el-menu-item index="/explore">Explore</el-menu-item>
         <el-menu-item index="/apis">API</el-menu-item>
         <el-menu-item index="/issues">Issues</el-menu-item>
+        <el-menu-item index="/logs">Logs</el-menu-item>
         <el-menu-item index="/releases">Releases</el-menu-item>
         <el-menu-item index="/replays">Session Replay</el-menu-item>
         <el-menu-item index="/alerts">Alerts</el-menu-item>
+        <el-menu-item index="/crons">Crons</el-menu-item>
+        <el-menu-item index="/uptime">Uptime</el-menu-item>
       </el-menu>
     </el-aside>
     <el-container>

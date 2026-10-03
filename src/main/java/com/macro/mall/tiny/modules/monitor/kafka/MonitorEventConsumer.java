@@ -12,6 +12,8 @@ import io.micrometer.tracing.Link;
 import io.micrometer.tracing.Span;
 import io.micrometer.tracing.TraceContext;
 import io.micrometer.tracing.Tracer;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.apache.kafka.clients.consumer.ConsumerRecord;
 import org.apache.kafka.common.header.Header;
 import lombok.RequiredArgsConstructor;
@@ -29,6 +31,8 @@ import java.util.regex.Pattern;
 @Component
 @RequiredArgsConstructor
 public class MonitorEventConsumer {
+
+    private static final Logger LOGGER = LoggerFactory.getLogger(MonitorEventConsumer.class);
 
     private static final Pattern TRACEPARENT = Pattern.compile(
             "(?i)^([0-9a-f]{2})-([0-9a-f]{32})-([0-9a-f]{16})-([0-9a-f]{2})(?:-([0-9a-f]+))?$"
@@ -69,6 +73,16 @@ public class MonitorEventConsumer {
     @KafkaListener(topics = "${monitor.kafka.topics.replay}")
     public void consumeReplay(List<ConsumerRecord<String, String>> records) {
         persistBatch(records, MonitorEventType.REPLAY);
+    }
+
+    @KafkaListener(topics = "${monitor.kafka.topics.metric}")
+    public void consumeMetric(List<ConsumerRecord<String, String>> records) {
+        persistBatch(records, MonitorEventType.METRIC);
+    }
+
+    @KafkaListener(topics = "${monitor.kafka.topics.profile}")
+    public void consumeProfile(List<ConsumerRecord<String, String>> records) {
+        persistBatch(records, MonitorEventType.PROFILE);
     }
 
     private void persistBatch(List<ConsumerRecord<String, String>> records, MonitorEventType expectedType) {
@@ -140,12 +154,17 @@ public class MonitorEventConsumer {
                         : "";
 
                 if (expectedType == MonitorEventType.REPLAY) {
-                    MonitorReplay replay = replayService.store(project, event);
                     Map<String, Object> replayRef = new LinkedHashMap<>();
-                    replayRef.put("replayId", replay.getId());
-                    replayRef.put("eventCount", replay.getEventCount());
-                    replayRef.put("sessionId", replay.getSessionId());
-                    replayRef.put("format", "rrweb");
+                    try {
+                        MonitorReplay replay = replayService.store(project, event);
+                        replayRef.put("replayId", replay.getId());
+                        replayRef.put("eventCount", replay.getEventCount());
+                        replayRef.put("sessionId", replay.getSessionId());
+                        replayRef.put("format", "rrweb");
+                    } catch (MonitorReplayQuotaExceededException e) {
+                        LOGGER.warn("Skipping Replay upload after project quota was exceeded: {}", e.getMessage());
+                        replayRef.put("quotaExceeded", true);
+                    }
                     event.setData(replayRef);
                 }
 
@@ -165,7 +184,9 @@ public class MonitorEventConsumer {
                 if (expectedType == MonitorEventType.ERROR) {
                     issueService.aggregate(item.project(), item.event(), item.fingerprint());
                     alertEngine.evaluate(item.project(), item.event(), item.fingerprint());
-                } else if (expectedType == MonitorEventType.PERFORMANCE) {
+                } else if (expectedType == MonitorEventType.PERFORMANCE
+                        || expectedType == MonitorEventType.METRIC
+                        || expectedType == MonitorEventType.BEHAVIOR) {
                     alertEngine.evaluate(item.project(), item.event(), "");
                 }
             }

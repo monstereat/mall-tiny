@@ -34,13 +34,13 @@ jobs:
       - name: Build monitoring SDK and demo
         working-directory: monitor/sdk
         run: |
-          pnpm install --no-frozen-lockfile
+          pnpm install --frozen-lockfile
           pnpm build
 
       - name: Build admin console
         working-directory: admin
         run: |
-          pnpm install --no-frozen-lockfile
+          pnpm install --frozen-lockfile
           pnpm build
 
   infrastructure-e2e:
@@ -48,6 +48,10 @@ jobs:
     timeout-minutes: 25
     env:
       COMPOSE_PROJECT_NAME: monitor-platform-ci-${{ github.run_id }}
+      MYSQL_ROOT_PASSWORD: monitor-platform-ci-mysql
+      CLICKHOUSE_PASSWORD: monitor-platform-ci-clickhouse
+      MINIO_ROOT_USER: monitor
+      MINIO_ROOT_PASSWORD: monitor-platform-ci-minio
     steps:
       - uses: actions/checkout@v4
 
@@ -62,7 +66,7 @@ jobs:
 
       - name: Install monitoring workspace dependencies
         working-directory: monitor/sdk
-        run: pnpm install --no-frozen-lockfile
+        run: pnpm install --frozen-lockfile
 
       - name: Build the monitoring SDK and demo
         working-directory: monitor/sdk
@@ -72,11 +76,34 @@ jobs:
         working-directory: monitor/demo
         run: pnpm exec playwright install --with-deps chromium
 
+      - name: Verify ClickHouse S3 cold tier and deployment migrations
+        run: bash infra/clickhouse/tests/s3-cold-tier.sh
+
       - name: Start the monitoring stack and browser demo
         run: docker compose -p "$COMPOSE_PROJECT_NAME" -f docker-compose.deploy.yml -f monitor/demo/docker-compose.e2e.yml up -d --build
 
+      - name: Wait for Server readiness
+        run: |
+          set -euo pipefail
+          for attempt in $(seq 1 120); do
+            if curl --fail --silent --max-time 2 http://localhost:8081/actuator/health | grep -q '"status":"UP"'; then
+              echo 'Server health check passed.'
+              exit 0
+            fi
+            sleep 1
+          done
+          docker compose -p "$COMPOSE_PROJECT_NAME" -f docker-compose.deploy.yml -f monitor/demo/docker-compose.e2e.yml logs --tail=160 server
+          echo 'Server did not become healthy within 120 seconds.' >&2
+          exit 1
+
+      - name: Verify Alertmanager firing and recovery delivery
+        run: docker compose -p "$COMPOSE_PROJECT_NAME" -f docker-compose.deploy.yml -f monitor/demo/docker-compose.e2e.yml exec -T e2e-alert-receiver python /app/verify.py
+
       - name: Verify browser API and Kafka trace
         run: pnpm --dir monitor/demo test:e2e:trace --grep "browser API probe"
+
+      - name: Verify Issue auto-regression from browser error
+        run: pnpm --dir monitor/demo test:e2e:trace --grep "real browser error reopens"
 
       - name: Verify Replay error context capture
         run: pnpm --dir monitor/demo test:e2e:trace --grep "opted-in unsampled session"
@@ -91,7 +118,7 @@ jobs:
         if: failure()
         run: |
           docker compose -p "$COMPOSE_PROJECT_NAME" -f docker-compose.deploy.yml -f monitor/demo/docker-compose.e2e.yml ps --all
-          docker compose -p "$COMPOSE_PROJECT_NAME" -f docker-compose.deploy.yml -f monitor/demo/docker-compose.e2e.yml logs --no-color --tail=120 server kafka clickhouse minio jaeger demo
+          docker compose -p "$COMPOSE_PROJECT_NAME" -f docker-compose.deploy.yml -f monitor/demo/docker-compose.e2e.yml logs --no-color --tail=120 server kafka clickhouse minio jaeger prometheus alertmanager e2e-alert-receiver demo
           for context in monitor/demo/test-results/*/error-context.md; do
             if [ -f "$context" ]; then
               echo "===== $context ====="

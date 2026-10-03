@@ -46,6 +46,9 @@ public class MonitorProjectService {
         String releaseKey = generateKey();
 
         MonitorProject project = new MonitorProject();
+        com.macro.mall.tiny.modules.monitor.model.MonitorTeam team = accessService.teamForProjectCreation(request.getTeamId());
+        project.setTenantId(team.getTenantId());
+        project.setTeamId(team.getId());
         project.setName(request.getName());
         project.setProjectKey(request.getProjectKey());
         project.setPlatform(request.getPlatform() == null || request.getPlatform().isBlank() ? "web" : request.getPlatform());

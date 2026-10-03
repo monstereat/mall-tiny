@@ -1,0 +1,29 @@
+groups:
+  - name: clickhouse-retention-capacity
+    rules:
+      - alert: ClickHouseDiskHeadroomLow
+        expr: ClickHouseAsyncMetrics_FilesystemMainPathAvailableBytes < 10737418240
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: ClickHouse backing filesystem has less than 10 GiB free
+          description: The filesystem containing ClickHouse's data path is shared by Docker Desktop and may include other containers, images, and volumes. Check ClickHouse table growth and host-level Docker storage before increasing retention.
+
+      - alert: ClickHouseDiskHeadroomCritical
+        expr: ClickHouseAsyncMetrics_FilesystemMainPathAvailableBytes < 5368709120
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: ClickHouse backing filesystem has less than 5 GiB free
+          description: Writes and background merges may fail when the shared filesystem runs out of space. Check ClickHouse table growth and host-level Docker storage immediately.
+
+      - alert: ClickHouseMergeTreePartsHigh
+        expr: ClickHouseAsyncMetrics_TotalPartsOfMergeTreeTables > 10000
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: ClickHouse has more than 10,000 MergeTree parts
+          description: A high part count can slow startup and queries. Check insert batch sizing, partition cardinality, and merge backlog before adding storage.

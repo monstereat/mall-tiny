@@ -1,4 +1,4 @@
-export type MonitorEventType = 'ERROR' | 'PERFORMANCE' | 'BEHAVIOR' | 'REPLAY';
+export type MonitorEventType = 'ERROR' | 'PERFORMANCE' | 'BEHAVIOR' | 'REPLAY' | 'METRIC' | 'PROFILE';
 
 export interface MonitorClientOptions {
   endpoint: string;
@@ -7,6 +7,16 @@ export interface MonitorClientOptions {
   release?: string;
   environment?: string;
   sampleRate?: number;
+  /** Opt-in probability for browser JavaScript CPU profiles. Defaults to 0. */
+  profileSampleRate?: number;
+  /** Duration of each CPU profile window in milliseconds. Defaults to 60000. */
+  profileIntervalMs?: number;
+  /** Requested JS profiler sample interval in milliseconds. Defaults to 10. */
+  profileSampleIntervalMs?: number;
+  /** Opt-in probability for browser JavaScript memory samples. Defaults to 0. */
+  profileMemorySampleRate?: number;
+  /** Time between JavaScript memory samples in milliseconds. Defaults to 60000. */
+  profileMemoryIntervalMs?: number;
   batchSize?: number;
   flushInterval?: number;
   sessionId?: string;
@@ -44,6 +54,28 @@ interface QueuedMonitorEvent extends MonitorEventEnvelope {
   traceparent?: string;
 }
 
+interface SelfProfilerTrace {
+  resources: string[];
+  frames: Array<{ name: string; resourceId?: number; line?: number; column?: number }>;
+  stacks: Array<{ frameId: number; parentId?: number }>;
+  samples: Array<{ stackId?: number }>;
+}
+
+interface SelfProfiler {
+  readonly sampleInterval: number;
+  stop(): Promise<SelfProfilerTrace>;
+}
+
+type SelfProfilerConstructor = new (options: { sampleInterval: number; maxBufferSize: number }) => SelfProfiler;
+
+interface MemoryMeasurement {
+  bytes: number;
+}
+
+interface MemoryPerformance extends Performance {
+  measureUserAgentSpecificMemory?: () => Promise<MemoryMeasurement>;
+}
+
 const SDK_VERSION = '0.2.0';
 
 function randomId(): string {
@@ -78,11 +110,19 @@ export class MonitorClient {
   private retryTimer?: ReturnType<typeof setTimeout>;
   private retryAttempt = 0;
   private flushing = false;
+  private profileTimer?: ReturnType<typeof setTimeout>;
+  private profiler?: SelfProfiler;
+  private profileStartedAt = 0;
+  private memoryProfileTimer?: ReturnType<typeof setTimeout>;
+  private memoryProfileEnabled = false;
+  private closed = false;
 
   constructor(private readonly options: MonitorClientOptions) {
     this.sessionId = options.sessionId ?? randomId();
     this.userId = options.userId;
     this.restoreQueue();
+    this.startProfiler();
+    this.startMemoryProfiler();
 
     const interval = options.flushInterval ?? 5000;
     if (interval > 0) {
@@ -173,6 +213,49 @@ export class MonitorClient {
     }, traceparent);
   }
 
+  recordMetric(
+    name: string,
+    value: number,
+    options: {
+      metricType?: 'counter' | 'gauge' | 'distribution';
+      unit?: string;
+      tags?: Record<string, string | number | boolean>;
+      timestamp?: number;
+      traceId?: string;
+      traceparent?: string;
+    } = {}
+  ): string | null {
+    return this.capture({
+      eventType: 'METRIC',
+      timestamp: options.timestamp,
+      traceId: options.traceId,
+      data: {
+        name,
+        metricType: options.metricType ?? 'gauge',
+        value,
+        unit: options.unit,
+        tags: options.tags,
+        exemplar: options.traceId ? { traceId: options.traceId } : undefined
+      }
+    }, options.traceparent);
+  }
+
+  recordProfile(
+    samples: Array<{ stack: string[]; value: number }>,
+    options: { name?: string; unit?: string; timestamp?: number } = {}
+  ): string | null {
+    return this.capture({
+      eventType: 'PROFILE',
+      timestamp: options.timestamp,
+      data: {
+        format: 'collapsed',
+        name: options.name ?? 'CPU',
+        unit: options.unit ?? 'samples',
+        samples
+      }
+    });
+  }
+
   async flush(keepalive = false): Promise<void> {
     if (this.flushing || this.queue.length === 0) return;
 
@@ -227,12 +310,18 @@ export class MonitorClient {
   }
 
   async close(): Promise<void> {
+    this.closed = true;
     if (this.timer) {
       clearInterval(this.timer);
       this.timer = undefined;
     }
     this.clearRetry();
+    if (this.memoryProfileTimer) {
+      clearTimeout(this.memoryProfileTimer);
+      this.memoryProfileTimer = undefined;
+    }
     try {
+      await this.stopProfiler();
       await this.flush(true);
     } finally {
       this.persistQueue();
@@ -251,6 +340,123 @@ export class MonitorClient {
     this.queue.push(event);
     this.trimQueue();
     this.persistQueue();
+  }
+
+  private startProfiler(): void {
+    if (this.closed) return;
+    if (Math.random() >= clampRate(this.options.profileSampleRate ?? 0)) return;
+    const Profiler = (globalThis as typeof globalThis & { Profiler?: SelfProfilerConstructor }).Profiler;
+    if (!Profiler) return;
+
+    try {
+      this.profileStartedAt = Date.now();
+      const requestedInterval = Math.max(1, Math.min(100, this.options.profileSampleIntervalMs ?? 10));
+      this.profiler = new Profiler({ sampleInterval: requestedInterval, maxBufferSize: 6000 });
+      const actualInterval = Number.isFinite(this.profiler.sampleInterval) && this.profiler.sampleInterval > 0
+        ? this.profiler.sampleInterval
+        : requestedInterval;
+      const safeDuration = Math.max(1000, actualInterval * 6000);
+      const duration = Math.max(1000, Math.min(60_000, this.options.profileIntervalMs ?? 60_000, safeDuration));
+      this.profileTimer = setTimeout(() => {
+        void this.stopProfiler().then(() => this.startProfiler()).catch(() => undefined);
+      }, duration);
+    } catch {
+      this.profiler = undefined;
+    }
+  }
+
+  private startMemoryProfiler(): void {
+    if (this.closed || Math.random() >= clampRate(this.options.profileMemorySampleRate ?? 0)) return;
+    const performanceApi = globalThis.performance as MemoryPerformance | undefined;
+    if (!globalThis.isSecureContext || globalThis.crossOriginIsolated !== true
+        || typeof performanceApi?.measureUserAgentSpecificMemory !== 'function') return;
+
+    this.memoryProfileEnabled = true;
+    this.scheduleMemoryProfile();
+  }
+
+  private scheduleMemoryProfile(): void {
+    if (!this.memoryProfileEnabled || this.closed) return;
+    const interval = Math.max(10_000, Math.min(600_000, this.options.profileMemoryIntervalMs ?? 60_000));
+    const delay = Math.round(interval * (0.9 + Math.random() * 0.2));
+    this.memoryProfileTimer = setTimeout(() => {
+      this.memoryProfileTimer = undefined;
+      void this.collectMemoryProfile().finally(() => this.scheduleMemoryProfile());
+    }, delay);
+  }
+
+  private async collectMemoryProfile(): Promise<void> {
+    const performanceApi = globalThis.performance as MemoryPerformance | undefined;
+    const measure = performanceApi?.measureUserAgentSpecificMemory;
+    if (!this.memoryProfileEnabled || this.closed || typeof measure !== 'function') return;
+    try {
+      const result = await measure.call(performanceApi);
+      if (!Number.isFinite(result.bytes) || result.bytes <= 0) return;
+      this.recordProfile([{ stack: ['JavaScript memory (estimated)'], value: result.bytes }], {
+        name: 'JavaScript Memory',
+        unit: 'bytes'
+      });
+    } catch {
+      // Memory measurement is optional and must not interrupt application telemetry.
+    }
+  }
+
+  private async stopProfiler(): Promise<void> {
+    if (this.profileTimer) {
+      clearTimeout(this.profileTimer);
+      this.profileTimer = undefined;
+    }
+    const profiler = this.profiler;
+    this.profiler = undefined;
+    if (!profiler) return;
+
+    try {
+      const trace = await profiler.stop();
+      const counts = new Map<string, number>();
+      for (const sample of trace.samples) {
+        if (!Number.isInteger(sample.stackId)) continue;
+        const frames: string[] = [];
+        let stack: SelfProfilerTrace['stacks'][number] | undefined = trace.stacks[sample.stackId as number];
+        let remaining = trace.stacks.length;
+        while (stack && remaining-- > 0) {
+          const frame = trace.frames[stack.frameId];
+          if (frame) {
+            const resource = Number.isInteger(frame.resourceId)
+              ? trace.resources[frame.resourceId as number]
+              : undefined;
+            const path = resource ? this.profileResourcePath(resource) : '';
+            const location = `${path}${Number.isInteger(frame.line) ? `:${frame.line}` : ''}${Number.isInteger(frame.column) ? `:${frame.column}` : ''}`;
+            const name = String(frame.name || '(anonymous)');
+            frames.push((location ? `${name}@${location}` : name).slice(0, 96));
+          }
+          stack = Number.isInteger(stack.parentId) ? trace.stacks[stack.parentId as number] : undefined;
+        }
+        if (frames.length === 0) continue;
+        const collapsedStack = frames.reverse().slice(-64).join(';');
+        if (counts.has(collapsedStack) || counts.size < 200) {
+          counts.set(collapsedStack, (counts.get(collapsedStack) ?? 0) + 1);
+        }
+      }
+
+      if (counts.size > 0) {
+        this.recordProfile([...counts].map(([stack, value]) => ({ stack: stack.split(';'), value })), {
+          name: 'JavaScript CPU',
+          unit: 'samples',
+          timestamp: this.profileStartedAt
+        });
+      }
+    } catch {
+      // Profiling is optional and must not interrupt application telemetry.
+    }
+  }
+
+  private profileResourcePath(resource: string): string {
+    try {
+      const url = new URL(resource, typeof location === 'undefined' ? undefined : location.href);
+      return url.pathname.slice(0, 300);
+    } catch {
+      return resource.split(/[?#]/, 1)[0].slice(0, 300);
+    }
   }
 
   private takeBatch(batchSize: number): QueuedMonitorEvent[] {

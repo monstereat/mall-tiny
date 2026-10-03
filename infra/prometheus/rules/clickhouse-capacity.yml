@@ -1,0 +1,29 @@
+groups:
+  - name: clickhouse-capacity
+    rules:
+      - alert: ClickHouseDiskUsageHigh
+        expr: ClickHouseAsyncMetrics_FilesystemMainPathUsedBytes / ClickHouseAsyncMetrics_FilesystemMainPathTotalBytes > 0.8
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: Filesystem backing ClickHouse is above 80% usage
+          description: The filesystem containing ClickHouse's data path has remained above 80% usage for 10 minutes; on shared Docker Desktop storage this includes other containers, images, and volumes.
+
+      - alert: ClickHouseDiskUsageCritical
+        expr: ClickHouseAsyncMetrics_FilesystemMainPathUsedBytes / ClickHouseAsyncMetrics_FilesystemMainPathTotalBytes > 0.9
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: Filesystem backing ClickHouse is above 90% usage
+          description: The filesystem containing ClickHouse's data path has remained above 90% usage for 5 minutes; on shared Docker Desktop storage this includes other containers, images, and volumes.
+
+      - alert: ClickHouseInodesLow
+        expr: ClickHouseAsyncMetrics_FilesystemMainPathAvailableINodes / ClickHouseAsyncMetrics_FilesystemMainPathTotalINodes < 0.05
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: ClickHouse data volume has fewer than 5% inodes available
+          description: ClickHouse data volume inode availability has remained below 5% for 10 minutes.

@@ -16,7 +16,8 @@ public interface MonitorIssueMapper extends BaseMapper<MonitorIssue> {
             (#{projectId}, #{fingerprint}, #{title}, 'unresolved', 1, #{affectedUsers}, #{eventTime}, #{eventTime}, #{release})
         ON DUPLICATE KEY UPDATE
             title = VALUES(title),
-            status = IF(status = 'resolved', 'unresolved', status),
+            regressed_at = IF(status = 'resolved' AND (resolved_at IS NULL OR VALUES(last_seen) > resolved_at), VALUES(last_seen), regressed_at),
+            status = IF(status = 'resolved' AND (resolved_at IS NULL OR VALUES(last_seen) > resolved_at), 'unresolved', status),
             event_count = event_count + 1,
             affected_users = GREATEST(affected_users, VALUES(affected_users)),
             last_seen = GREATEST(last_seen, VALUES(last_seen)),

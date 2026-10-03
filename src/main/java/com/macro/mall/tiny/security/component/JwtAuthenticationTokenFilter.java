@@ -10,6 +10,8 @@ import org.springframework.security.core.context.SecurityContextHolder;
 import org.springframework.security.core.userdetails.UserDetails;
 import org.springframework.security.core.userdetails.UserDetailsService;
 import org.springframework.security.web.authentication.WebAuthenticationDetailsSource;
+import org.springframework.security.saml2.provider.service.authentication.Saml2AuthenticatedPrincipal;
+import com.macro.mall.tiny.modules.monitor.service.MonitorSamlTokenRevocationService;
 import org.springframework.stereotype.Component;
 import org.springframework.web.filter.OncePerRequestFilter;
 
@@ -29,6 +31,8 @@ public class JwtAuthenticationTokenFilter extends OncePerRequestFilter {
     private UserDetailsService userDetailsService;
     @Autowired
     private JwtTokenUtil jwtTokenUtil;
+    @Autowired
+    private MonitorSamlTokenRevocationService samlTokenRevocationService;
     @Value("${jwt.tokenHeader}")
     private String tokenHeader;
     @Value("${jwt.tokenHead}")
@@ -38,14 +42,24 @@ public class JwtAuthenticationTokenFilter extends OncePerRequestFilter {
     protected void doFilterInternal(HttpServletRequest request,
                                     HttpServletResponse response,
                                     FilterChain chain) throws ServletException, IOException {
+        String requestUri = request.getRequestURI();
+        if (requestUri.equals("/scim/v2") || requestUri.startsWith("/scim/v2/")) {
+            chain.doFilter(request, response);
+            return;
+        }
         String authHeader = request.getHeader(this.tokenHeader);
         if (authHeader != null && authHeader.startsWith(this.tokenHead)) {
             String authToken = authHeader.substring(this.tokenHead.length());// The part after "Bearer "
             String username = jwtTokenUtil.getUserNameFromToken(authToken);
             LOGGER.info("checking username:{}", username);
-            if (username != null && SecurityContextHolder.getContext().getAuthentication() == null) {
+            var currentAuthentication = SecurityContextHolder.getContext().getAuthentication();
+            boolean hasSamlSession = currentAuthentication != null
+                    && currentAuthentication.getPrincipal() instanceof Saml2AuthenticatedPrincipal;
+            if (username != null && (currentAuthentication == null || hasSamlSession)) {
                 UserDetails userDetails = this.userDetailsService.loadUserByUsername(username);
-                if (jwtTokenUtil.validateToken(authToken, userDetails)) {
+                var samlIdentity = jwtTokenUtil.getSamlTokenIdentity(authToken);
+                boolean revoked = samlIdentity != null && samlTokenRevocationService.isRevoked(samlIdentity);
+                if (jwtTokenUtil.validateToken(authToken, userDetails) && !revoked) {
                     UsernamePasswordAuthenticationToken authentication = new UsernamePasswordAuthenticationToken(userDetails, null, userDetails.getAuthorities());
                     authentication.setDetails(new WebAuthenticationDetailsSource().buildDetails(request));
                     LOGGER.info("authenticated user:{}", username);

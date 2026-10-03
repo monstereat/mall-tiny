@@ -5,6 +5,7 @@ import { mkdir, writeFile } from 'node:fs/promises';
 const apiUrl = 'http://localhost:8080/admin/info';
 const batchUrl = 'http://localhost:8080/api/v1/envelope/batch';
 const jaegerUrl = 'http://localhost:16686';
+const jaegerTraceSearchUrl = `${jaegerUrl}/api/v3/traces`;
 let browserTraceDiagnostics: Record<string, unknown> = {};
 
 test.afterEach(async ({}, testInfo) => {
@@ -30,9 +31,17 @@ function traceId(traceparent: string): string {
 test('browser API probe, SDK batch, Kafka producer and consumer share one trace', async ({ page, request }) => {
   browserTraceDiagnostics = { step: 'wait-for-server-health' };
   await expect.poll(async () => {
-    const health = await request.get('http://localhost:8081/actuator/health');
-    browserTraceDiagnostics = { step: 'wait-for-server-health', status: health.status() };
-    return health.ok();
+    try {
+      const health = await request.get('http://localhost:8081/actuator/health', { timeout: 5_000 });
+      browserTraceDiagnostics = { step: 'wait-for-server-health', status: health.status() };
+      return health.ok();
+    } catch (error) {
+      browserTraceDiagnostics = {
+        step: 'wait-for-server-health',
+        requestError: error instanceof Error ? error.message : String(error)
+      };
+      return false;
+    }
   }, { timeout: 120_000, intervals: [1000, 2000, 5000] }).toBe(true);
 
   browserTraceDiagnostics = { step: 'open-demo' };
@@ -85,6 +94,8 @@ test('browser API probe, SDK batch, Kafka producer and consumer share one trace'
 
   const expectedTraceId = traceId(apiRequestTraceparent!);
   const responseParentSpanId = responseTraceparent!.split('-')[2].toLowerCase();
+  const searchStartTime = new Date(Date.now() - 10 * 60_000).toISOString();
+  const searchEndTime = new Date(Date.now() + 60_000).toISOString();
   let traceDiagnostics: Record<string, unknown> = { traceId: expectedTraceId };
   browserTraceDiagnostics = { ...browserTraceDiagnostics, step: 'wait-for-jaeger-trace', traceId: expectedTraceId };
   try {
@@ -126,22 +137,64 @@ test('browser API probe, SDK batch, Kafka producer and consumer share one trace'
           && reference.spanID.toLowerCase() === responseParentSpanId));
       const producer = batchIngest && spans.find(span => span.operationName === 'monitor-behavior-v1 send'
         && hasAncestor(span, batchIngest.spanID));
-      const consumer = producer && spans.find(span => span.operationName === 'monitor.kafka.consume'
+      const directConsumer = producer && spans.find(span => span.operationName === 'monitor.kafka.consume'
         && span.references?.some(reference => reference.refType === 'CHILD_OF'
           && reference.spanID.toLowerCase() === producer.spanID.toLowerCase()));
+      let linkedConsumer: { traceId: string; spanId: string } | undefined;
+      let linkedSearchStatus: number | undefined;
+      if (producer && !directConsumer) {
+        const search = new URLSearchParams({
+          'query.serviceName': 'observability-platform',
+          'query.operationName': 'monitor.kafka.consume',
+          'query.startTimeMin': searchStartTime,
+          'query.startTimeMax': searchEndTime,
+          'query.searchDepth': '100'
+        });
+        const linkedTracesResponse = await request.get(`${jaegerTraceSearchUrl}?${search}`);
+        linkedSearchStatus = linkedTracesResponse.status();
+        if (linkedTracesResponse.ok()) {
+          const linkedTraces = await linkedTracesResponse.json() as {
+            result?: {
+              resourceSpans?: Array<{
+                scopeSpans?: Array<{
+                  spans?: Array<{
+                    traceId: string;
+                    spanId: string;
+                    name: string;
+                    links?: Array<{ traceId: string; spanId: string }>;
+                  }>;
+                }>;
+              }>;
+            };
+          };
+          const consumers = linkedTraces.result?.resourceSpans?.flatMap(resource =>
+            resource.scopeSpans?.flatMap(scope => scope.spans ?? []) ?? []) ?? [];
+          const match = consumers.find(span => span.name === 'monitor.kafka.consume'
+            && span.links?.some(link => link.traceId.toLowerCase() === expectedTraceId
+              && link.spanId.toLowerCase() === producer.spanID.toLowerCase()));
+          if (match) linkedConsumer = { traceId: match.traceId, spanId: match.spanId };
+        }
+      }
       traceDiagnostics = {
         traceId: expectedTraceId,
         jaegerStatus: traceResponse.status(),
+        linkedSearchStatus,
         expectedParentSpanId: responseParentSpanId,
         spans: spans.map(span => ({
           operationName: span.operationName,
           spanId: span.spanID,
           parents: span.references?.filter(reference => reference.refType === 'CHILD_OF').map(reference => reference.spanID) ?? []
         })),
-        matched: { apiProbe: Boolean(apiProbe), batchIngest: Boolean(batchIngest), producer: Boolean(producer), consumer: Boolean(consumer) }
+        matched: {
+          apiProbe: Boolean(apiProbe),
+          batchIngest: Boolean(batchIngest),
+          producer: Boolean(producer),
+          directConsumer: Boolean(directConsumer),
+          linkedConsumer
+        }
       };
       browserTraceDiagnostics = { ...browserTraceDiagnostics, ...traceDiagnostics };
-      return Boolean(apiProbe && batchIngest && producer && consumer);
+      return Boolean(apiProbe && batchIngest && producer && (directConsumer || linkedConsumer));
     }, { timeout: 60_000, intervals: [500, 1000, 2000] }).toBe(true);
   } catch (error) {
     browserTraceDiagnostics = { ...browserTraceDiagnostics, failure: String(error) };

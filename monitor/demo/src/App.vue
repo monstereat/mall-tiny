@@ -2,8 +2,12 @@
 import { inject } from 'vue';
 
 const replayErrorBufferTest = inject<boolean>('monitorReplayErrorBufferTest', false);
+const issueRegressionRunId = new URLSearchParams(location.search).get('issueRegression');
 
 function jsError() {
+  if (issueRegressionRunId) {
+    throw new Error(`issue regression probe ${issueRegressionRunId}`);
+  }
   const value: any = undefined;
   value.profile.name = 'boom';
 }

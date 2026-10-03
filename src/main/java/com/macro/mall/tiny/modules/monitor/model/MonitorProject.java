@@ -16,6 +16,8 @@ public class MonitorProject implements Serializable {
     @TableId(value = "id", type = IdType.AUTO)
     private Long id;
 
+    private Long tenantId;
+    private Long teamId;
     private String name;
     private String projectKey;
     @JsonIgnore

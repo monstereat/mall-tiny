@@ -24,6 +24,7 @@
         <minio.version>8.6.0</minio.version>
         <okhttp3.version>5.1.0</okhttp3.version>
         <velocity.version>2.4</velocity.version>
+        <opentelemetry.instrumentation.version>2.14.0-alpha</opentelemetry.instrumentation.version>
     </properties>
 
     <parent>
@@ -53,6 +54,11 @@
         <dependency>
             <groupId>io.opentelemetry</groupId>
             <artifactId>opentelemetry-exporter-otlp</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>io.opentelemetry.instrumentation</groupId>
+            <artifactId>opentelemetry-logback-appender-1.0</artifactId>
+            <version>${opentelemetry.instrumentation.version}</version>
         </dependency>
         <dependency>
             <groupId>org.springframework.boot</groupId>
@@ -95,6 +101,10 @@
         <dependency>
             <groupId>org.springframework.boot</groupId>
             <artifactId>spring-boot-starter-security</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>org.springframework.security</groupId>
+            <artifactId>spring-security-saml2-service-provider</artifactId>
         </dependency>
         <!--Hutool Java工具包-->
         <dependency>
@@ -226,6 +236,14 @@
 
     <!--使用aliyun的Maven镜像源提升下载速度-->
     <repositories>
+        <repository>
+            <id>shibboleth-releases</id>
+            <name>Shibboleth Releases Repository</name>
+            <url>https://build.shibboleth.net/maven/releases/</url>
+            <snapshots>
+                <enabled>false</enabled>
+            </snapshots>
+        </repository>
         <repository>
             <id>aliyunmaven</id>
             <name>aliyun</name>

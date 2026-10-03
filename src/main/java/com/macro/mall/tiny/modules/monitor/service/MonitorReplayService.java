@@ -30,6 +30,7 @@ public class MonitorReplayService {
     private final MonitorReplayMapper replayMapper;
     private final MinioClient minioClient;
     private final MinioBucketService bucketService;
+    private final MonitorReplayQuotaService quotaService;
     private final ObjectMapper objectMapper;
 
     @Value("${monitor.minio.replay-bucket:monitor-replays}")
@@ -50,15 +51,6 @@ public class MonitorReplayService {
                     safe(event.getSessionId()) + "/" +
                     safe(event.getEventId()) + (useCompression ? ".json.gz" : ".json");
 
-            minioClient.putObject(
-                    PutObjectArgs.builder()
-                            .bucket(replayBucket)
-                            .object(objectKey)
-                            .stream(new ByteArrayInputStream(bytes), bytes.length, -1)
-                            .contentType(useCompression ? "application/gzip" : "application/json")
-                            .build()
-            );
-
             MonitorReplay replay = new MonitorReplay();
             replay.setProjectId(project.getId());
             replay.setEventId(event.getEventId());
@@ -68,8 +60,20 @@ public class MonitorReplayService {
             replay.setEventCount(replayEvents instanceof Collection<?> c ? c.size() : 0);
             replay.setStartTime(new Date(event.getTimestamp()));
             replay.setEndTime(new Date(event.getTimestamp()));
-            replayMapper.insert(replay);
-            return replay;
+            return quotaService.storeIfWithinQuota(replayBucket, project.getProjectKey(), bytes.length, () -> {
+                minioClient.putObject(
+                        PutObjectArgs.builder()
+                                .bucket(replayBucket)
+                                .object(objectKey)
+                                .stream(new ByteArrayInputStream(bytes), bytes.length, -1)
+                                .contentType(useCompression ? "application/gzip" : "application/json")
+                                .build()
+                );
+                replayMapper.insert(replay);
+                return replay;
+            });
+        } catch (MonitorReplayQuotaExceededException e) {
+            throw e;
         } catch (Exception e) {
             throw new IllegalStateException("session replay storage failed", e);
         }
