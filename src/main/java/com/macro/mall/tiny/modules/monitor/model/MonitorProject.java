@@ -1,5 +1,6 @@
 package com.macro.mall.tiny.modules.monitor.model;
 
+import com.baomidou.mybatisplus.annotation.TableField;
 import com.baomidou.mybatisplus.annotation.IdType;
 import com.baomidou.mybatisplus.annotation.TableId;
 import com.baomidou.mybatisplus.annotation.TableName;
@@ -27,6 +28,14 @@ public class MonitorProject implements Serializable {
     private String platform;
     private Long ownerId;
     private Integer status;
+    @TableField(exist = false)
+    private Boolean canWrite;
+    private Boolean scrubEmails;
+    private Boolean scrubCreditCards;
+    private Boolean scrubIpAddresses;
+    private Boolean scrubPhoneNumbers;
+    private Boolean scrubChineseIdNumbers;
+    private String customSensitiveFields;
     private Date createTime;
     private Date updateTime;
 }

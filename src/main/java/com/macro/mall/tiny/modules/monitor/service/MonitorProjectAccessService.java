@@ -25,7 +25,9 @@ import org.springframework.web.server.ResponseStatusException;
 
 import java.util.List;
 import java.util.LinkedHashSet;
+import java.util.Map;
 import java.util.Set;
+import java.util.stream.Collectors;
 
 @Service
 @RequiredArgsConstructor
@@ -82,13 +84,31 @@ public class MonitorProjectAccessService {
         if (projectIds.isEmpty()) {
             return List.of();
         }
-        return projectMapper.selectList(
+        List<MonitorProject> projects = projectMapper.selectList(
                 Wrappers.<MonitorProject>lambdaQuery()
                         .in(MonitorProject::getId, projectIds)
                         .in(MonitorProject::getTenantId, tenantIds)
                         .eq(MonitorProject::getStatus, 1)
                         .orderByAsc(MonitorProject::getId)
         );
+        Map<Long, String> tenantRoles = tenantMemberships.stream().collect(Collectors.toMap(
+                MonitorTenantMember::getTenantId, MonitorTenantMember::getRole, (first, ignored) -> first
+        ));
+        Map<Long, String> projectRoles = memberships.stream().collect(Collectors.toMap(
+                MonitorProjectMember::getProjectId, MonitorProjectMember::getRole, (first, ignored) -> first
+        ));
+        Map<Long, String> teamRoles = teamMemberships.stream().collect(Collectors.toMap(
+                MonitorTeamMember::getTeamId, MonitorTeamMember::getRole, (first, ignored) -> first
+        ));
+        for (MonitorProject project : projects) {
+            String effectiveRole = projectRoles.get(project.getId());
+            if (effectiveRole == null) {
+                effectiveRole = teamRoles.get(project.getTeamId());
+            }
+            project.setCanWrite(!"VIEWER".equals(tenantRoles.get(project.getTenantId()))
+                    && effectiveRole != null && !"VIEWER".equals(effectiveRole));
+        }
+        return projects;
     }
 
     public MonitorProject requireProject(String projectKey, boolean write) {
@@ -122,6 +142,14 @@ public class MonitorProjectAccessService {
         MonitorProject project = requireProject(projectKey, true);
         requireOwner(project.getId());
         return project;
+    }
+
+    public boolean canManageProject(MonitorProject project) {
+        Long adminId = currentAdminId();
+        MonitorTenantMember tenantMembership = findTenantMembership(project.getTenantId(), adminId);
+        MonitorProjectMember membership = findMembership(project.getId(), adminId);
+        return tenantMembership != null && !"VIEWER".equals(tenantMembership.getRole())
+                && membership != null && "OWNER".equals(membership.getRole());
     }
 
     public MonitorTeam teamForProjectCreation(Long requestedTeamId) {

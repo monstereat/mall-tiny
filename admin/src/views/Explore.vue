@@ -45,6 +45,15 @@ function selectedMetricAliases() {
 }
 
 function handleSignalTypeChange() {
+  if (type.value === 'logs') {
+    if (hours.value > 168) {
+      hours.value = 168;
+      ElMessage.info('Logs 查询和聚合最多支持最近 7 天，时间范围已调整为 7 天');
+    }
+    if (!['signal', 'environment', 'release', 'level'].includes(groupBy.value)) groupBy.value = 'signal';
+    if (!['count', 'count_unique'].includes(aggregation.value)) aggregation.value = 'count';
+    aggregateField.value = aggregation.value === 'count_unique' ? 'user' : 'value';
+  }
   if (!['performance', 'metric'].includes(type.value) && aggregation.value !== 'count' && aggregation.value !== 'count_unique') {
     aggregation.value = 'count';
   }
@@ -54,20 +63,24 @@ function handleSignalTypeChange() {
 
 function handleAggregationChange() {
   if (aggregation.value === 'count_unique' && aggregateField.value === 'value') aggregateField.value = 'user';
+  if (type.value === 'logs' && aggregation.value === 'count_unique') aggregateField.value = 'user';
   if (['sum', 'avg', 'min', 'max', 'p50', 'p75', 'p95'].includes(aggregation.value)) aggregateField.value = 'value';
   void search();
 }
 
 async function search(reset = true) {
   if (!projects.currentKey) return;
-  if (type.value !== 'logs' && groupBy.value === 'tag' && !/^[A-Za-z0-9_.-]{1,64}$/.test(aggregationTagKey.value.trim())) {
-    ElMessage.warning('按 Tag 聚合时请输入有效的 Tag key');
+  if (!type.value && hours.value <= 168 && aggregation.value === 'count_unique'
+    && aggregateField.value === 'user' && groupBy.value !== 'signal') {
+    ElMessage.warning('混合唯一用户统计目前只支持按信号分组');
     return;
   }
-  if (type.value === 'logs' && (userId.value.trim() || tagKey.value.trim() || tagValue.value.trim())) {
-    rows.value = [];
-    hasMore.value = false;
-    ElMessage.warning('Logs 不支持 userId 或标签过滤，请清除这些条件后再查询');
+  if (type.value === 'logs' && hours.value > 168) {
+    ElMessage.warning('Logs 查询和聚合最多支持最近 7 天');
+    return;
+  }
+  if (type.value !== 'logs' && groupBy.value === 'tag' && !/^[A-Za-z0-9_.-]{1,64}$/.test(aggregationTagKey.value.trim())) {
+    ElMessage.warning('按 Tag 聚合时请输入有效的 Tag key');
     return;
   }
   if (formulaEnabled.value && (type.value !== 'metric' || formulaMetrics.value.length < 2)) {
@@ -98,7 +111,7 @@ async function search(reset = true) {
       : Promise.resolve([]);
     const [result, aggregate, formulas, names] = await Promise.all([
       monitorApi.explore(projects.currentKey, params),
-      type.value === 'logs' ? Promise.resolve(null) : monitorApi.exploreAggregation(projects.currentKey, {
+      monitorApi.exploreAggregation(projects.currentKey, {
         ...params, groupBy: aggregationDimension(), aggregation: aggregation.value, field: aggregateField.value
       }),
       formulaRequest,
@@ -143,9 +156,15 @@ function applySavedQuery(id: number) {
   aggregationTagKey.value = criteria.groupBy?.startsWith('tag.') ? criteria.groupBy.slice(4) : '';
   aggregation.value = criteria.aggregation || 'count';
   aggregateField.value = criteria.field || 'user';
+  if (type.value === 'logs') {
+    if (!['signal', 'environment', 'release', 'level'].includes(groupBy.value)) groupBy.value = 'signal';
+    if (!['count', 'count_unique'].includes(aggregation.value)) aggregation.value = 'count';
+    aggregateField.value = aggregation.value === 'count_unique' ? 'user' : 'value';
+  }
   formulaEnabled.value = Boolean(criteria.formula && criteria.formulaMetrics?.length);
   formulaExpression.value = criteria.formula || 'a / b * 100';
   formulaMetrics.value = criteria.formulaMetrics || [];
+  if (type.value === 'logs' && hours.value > 168) hours.value = 168;
   void search();
 }
 
@@ -255,7 +274,7 @@ watch(() => projects.currentKey, () => {
             <el-option label="最近 1 小时" :value="1" />
             <el-option label="最近 24 小时" :value="24" />
             <el-option label="最近 7 天" :value="168" />
-            <el-option label="最近 30 天" :value="720" />
+            <el-option label="最近 30 天" :value="720" :disabled="type === 'logs'" />
           </el-select>
         </el-form-item>
         <el-form-item label="信号">
@@ -266,7 +285,7 @@ watch(() => projects.currentKey, () => {
             <el-option label="Replay" value="replay" />
             <el-option label="Metrics" value="metric" />
             <el-option label="Profiling" value="profile" />
-            <el-option label="Logs（需要 Trace ID）" value="logs" />
+            <el-option label="Logs" value="logs" />
           </el-select>
         </el-form-item>
         <el-form-item label="Environment"><el-input v-model="environment" clearable /></el-form-item>
@@ -278,23 +297,25 @@ watch(() => projects.currentKey, () => {
         <el-form-item label="Tag value"><el-input v-model="tagValue" clearable /></el-form-item>
         <el-button type="primary" :loading="loading" @click="search()">查询</el-button>
       </el-form>
-      <div class="query-help">字段过滤默认以 AND 组合，也可用 <code>OR</code> 和括号分组；支持 <code>!值</code> 排除、引号值及 environment、release、trace、user、url、event、level 和 tag.&lt;key&gt;。OR/括号查询只写字段条件；普通文本可单独搜索事件内容。Logs 支持单个 Trace 与文本过滤。</div>
-      <el-alert v-if="type === 'logs'" title="Logs 查询只支持 trace:<id> 和文本过滤；其他字段筛选不适用。" type="warning" :closable="false" show-icon />
-      <div v-if="type !== 'logs'" class="aggregation">
+      <div class="query-help">字段过滤默认以 AND 组合，也可用 <code>OR</code> 和括号分组；支持 <code>!值</code> 排除、引号值及 environment、release、trace、user、url、event、level 和 tag.&lt;key&gt;。OR/括号查询只写字段条件；普通文本可单独搜索事件内容。</div>
+      <el-alert v-if="type === 'logs'" title="Logs 支持文本、Trace、Environment、Release、Level、User ID 和 Tag 筛选；聚合支持 count() 和按信号、Environment、Release 或 Level 分组的 count_unique(user)。唯一用户统计只覆盖带有 userId 元数据的日志；历史日志或未设置 userId 的日志不计入，时间范围最多 7 天。" type="info" :closable="false" show-icon />
+      <el-alert v-else-if="!type && hours <= 168 && aggregation === 'count_unique' && aggregateField === 'user'" title="混合唯一用户统计会精确合并 ClickHouse 与 Loki 的用户 ID，仅支持按信号分组和 Loki 可执行的筛选；每次查询最多处理 10,000 个 signal-user 组合，超出时请缩小范围。" type="info" :closable="false" show-icon />
+      <el-alert v-if="!type && hours > 168" title="全部信号的 30 天查询和聚合不包含 Logs；Loki Logs 统计最多支持 7 天。" type="warning" :closable="false" show-icon />
+      <div class="aggregation">
         <div class="aggregation-header">
           <strong>事件聚合</strong>
           <el-select v-model="groupBy" style="width:190px" @change="search()">
             <el-option label="按信号" value="signal" />
             <el-option label="按 Environment" value="environment" />
             <el-option label="按 Release" value="release" />
-            <el-option label="按 URL" value="url" />
+            <el-option v-if="type !== 'logs'" label="按 URL" value="url" />
             <el-option label="按 Level" value="level" />
-            <el-option label="按 Tag key" value="tag" />
+            <el-option v-if="type !== 'logs'" label="按 Tag key" value="tag" />
           </el-select>
           <el-input v-if="groupBy === 'tag'" v-model="aggregationTagKey" maxlength="64" placeholder="Tag key" style="width:140px" @change="search()" />
           <el-select v-model="aggregation" style="width:190px" @change="handleAggregationChange">
             <el-option label="事件数 count()" value="count" />
-            <el-option label="去重计数 count_unique()" value="count_unique" />
+            <el-option :label="type === 'logs' ? '唯一用户 count_unique(user)' : '去重计数 count_unique()'" value="count_unique" :disabled="!type && hours <= 168 && groupBy !== 'signal'" />
             <el-option label="总和 sum(value)" value="sum" :disabled="!['performance', 'metric'].includes(type)" />
             <el-option label="平均 avg(value)" value="avg" :disabled="!['performance', 'metric'].includes(type)" />
             <el-option label="最小 min(value)" value="min" :disabled="!['performance', 'metric'].includes(type)" />
@@ -303,17 +324,19 @@ watch(() => projects.currentKey, () => {
             <el-option label="P75" value="p75" :disabled="!['performance', 'metric'].includes(type)" />
             <el-option label="P95" value="p95" :disabled="!['performance', 'metric'].includes(type)" />
           </el-select>
-          <el-select v-if="aggregation === 'count_unique'" v-model="aggregateField" style="width:150px" @change="search()">
+          <el-select v-if="aggregation === 'count_unique'" v-model="aggregateField" style="width:150px" :disabled="type === 'logs'" @change="search()">
             <el-option label="User" value="user" />
+            <template v-if="type !== 'logs'">
             <el-option label="Event ID" value="event" />
             <el-option label="Trace ID" value="trace" />
             <el-option label="URL" value="url" />
+            </template>
           </el-select>
         </div>
         <el-table :data="aggregationBuckets" size="small" max-height="260">
           <el-table-column prop="value" label="分组值" min-width="180" show-overflow-tooltip />
-          <el-table-column prop="count" label="样本数" width="120" />
-          <el-table-column v-if="aggregation !== 'count'" prop="aggregateValue" :label="aggregation === 'count_unique' ? '去重值' : aggregation" width="150" />
+          <el-table-column prop="count" :label="aggregation === 'count_unique' && aggregateField === 'user' ? '唯一用户数' : '样本数'" width="120" />
+          <el-table-column v-if="aggregation !== 'count' && !(aggregation === 'count_unique' && aggregateField === 'user')" prop="aggregateValue" :label="aggregation === 'count_unique' ? '去重值' : aggregation" width="150" />
         </el-table>
         <div v-if="type === 'metric'" class="metric-formula">
           <el-checkbox v-model="formulaEnabled">多指标公式</el-checkbox>

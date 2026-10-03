@@ -13,7 +13,6 @@ import com.macro.mall.tiny.modules.monitor.model.MonitorDataDeletionItem;
 import com.macro.mall.tiny.modules.monitor.model.MonitorDataDeletionJob;
 import com.macro.mall.tiny.modules.monitor.model.MonitorProject;
 import com.macro.mall.tiny.modules.monitor.model.MonitorReplay;
-import io.minio.MinioClient;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.springframework.jdbc.core.JdbcTemplate;
@@ -27,6 +26,7 @@ import java.util.Map;
 import java.sql.Timestamp;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.Mockito.*;
@@ -35,6 +35,7 @@ import static org.mockito.ArgumentMatchers.any;
 
 class MonitorDataDeletionServiceTest {
     private final MonitorProjectAccessService accessService = mock(MonitorProjectAccessService.class);
+    private final MonitorProjectMapper projectMapper = mock(MonitorProjectMapper.class);
     private final MonitorDataDeletionJobMapper jobMapper = mock(MonitorDataDeletionJobMapper.class);
     private final MonitorDataDeletionItemMapper itemMapper = mock(MonitorDataDeletionItemMapper.class);
     private final MonitorReplayMapper replayMapper = mock(MonitorReplayMapper.class);
@@ -42,12 +43,13 @@ class MonitorDataDeletionServiceTest {
     private final MonitorDataDeletionIssueReconciler issueReconciler = mock(MonitorDataDeletionIssueReconciler.class);
     private final MonitorErrorHourlyDeletionReconciler hourlyReconciler = mock(MonitorErrorHourlyDeletionReconciler.class);
     private final MonitorDataDeletionAuditService auditService = mock(MonitorDataDeletionAuditService.class);
+    private final MonitorLokiDeletionClient lokiDeletionClient = mock(MonitorLokiDeletionClient.class);
     private final org.springframework.data.redis.core.StringRedisTemplate redis = mock(org.springframework.data.redis.core.StringRedisTemplate.class);
-    private final MinioClient minio = mock(MinioClient.class);
+    private final MonitorReplayQuotaService replayQuotaService = mock(MonitorReplayQuotaService.class);
     private final JdbcTemplate clickHouse = mock(JdbcTemplate.class);
     private final MonitorDataDeletionService service = new MonitorDataDeletionService(
-            accessService, jobMapper, itemMapper, replayMapper, issueMapper, issueReconciler, hourlyReconciler,
-            auditService, redis, minio, new ObjectMapper(), clickHouse);
+            accessService, projectMapper, jobMapper, itemMapper, replayMapper, issueMapper, issueReconciler, hourlyReconciler,
+            auditService, lokiDeletionClient, redis, replayQuotaService, new ObjectMapper(), clickHouse);
 
     @BeforeEach
     void ownerProjectAvailable() {
@@ -57,6 +59,7 @@ class MonitorDataDeletionServiceTest {
         project.setId(1L);
         project.setProjectKey("demo");
         when(accessService.requireProjectOwner("demo")).thenReturn(project);
+        when(projectMapper.lockProject(1L)).thenReturn(1L);
     }
 
     @Test
@@ -135,6 +138,8 @@ class MonitorDataDeletionServiceTest {
 
         assertTrue(job.getStartedAt() != null);
         assertEquals("SNAPSHOT_PERFORMANCE_EVENTS", job.getStage());
+        assertEquals("QUEUED", job.getStatus());
+        assertNull(job.getLeaseUntil());
         verify(jobMapper, atLeastOnce()).updateById(job);
     }
 
@@ -235,6 +240,72 @@ class MonitorDataDeletionServiceTest {
     }
 
     @Test
+    void spanDeletionSnapshotUsesProjectDateUserAndJobStartCutoff() {
+        MonitorDataDeletionJob job = deletionJob("user-1");
+        when(clickHouse.queryForList(anyString(), any(Object[].class))).thenReturn(java.util.List.of());
+
+        org.springframework.test.util.ReflectionTestUtils.invokeMethod(
+                service, "selectEventBatch", "span_event", job, "cursor");
+
+        org.mockito.ArgumentCaptor<String> sql = org.mockito.ArgumentCaptor.forClass(String.class);
+        org.mockito.ArgumentCaptor<Object[]> args = org.mockito.ArgumentCaptor.forClass(Object[].class);
+        verify(clickHouse).queryForList(sql.capture(), args.capture());
+        assertTrue(sql.getValue().contains("FROM monitor.span_event WHERE project_id=? AND event_time>=? AND event_time<?"));
+        assertTrue(sql.getValue().contains("received_at<=?"));
+        assertTrue(sql.getValue().contains("session_id IN (SELECT session_id FROM monitor.behavior_event"));
+        assertEquals("demo-web", args.getValue()[0]);
+        assertEquals(new Timestamp(job.getRangeStart().getTime()), args.getValue()[1]);
+        assertEquals(new Timestamp(job.getRangeEnd().getTime()), args.getValue()[2]);
+        assertEquals(new Timestamp(job.getStartedAt().getTime()), args.getValue()[3]);
+        assertEquals("user-1", args.getValue()[4]);
+        assertEquals("cursor", args.getValue()[10]);
+
+        when(clickHouse.queryForObject(anyString(), org.mockito.ArgumentMatchers.eq(Long.class), any(Object[].class)))
+                .thenReturn(2L);
+        Long count = org.springframework.test.util.ReflectionTestUtils.invokeMethod(
+                service, "countEvents", "span_event", "demo-web", job.getRangeStart().toInstant(),
+                job.getRangeEnd().toInstant(), job.getUserId());
+        assertEquals(2L, count);
+        verify(clickHouse).queryForObject(argThat(query -> query.contains("FROM monitor.span_event")),
+                org.mockito.ArgumentMatchers.eq(Long.class), any(Object[].class));
+    }
+
+    @Test
+    void profileAndSpanSnapshotStagesIncludeSpanBeforeReplay() {
+        MonitorDataDeletionJob job = deletionJob(null);
+        job.setId(41L);
+        job.setStatus("QUEUED");
+        job.setStage("SNAPSHOT_PROFILE_EVENTS");
+        when(jobMapper.selectOne(any())).thenReturn(job);
+        when(jobMapper.claim(41L)).thenReturn(1);
+        when(clickHouse.queryForList(anyString(), any(Object[].class))).thenReturn(java.util.List.of());
+        ReflectionTestUtils.setField(service, "workerEnabled", true);
+
+        service.processOneBatch();
+        assertEquals("SNAPSHOT_SPAN_EVENTS", job.getStage());
+        service.processOneBatch();
+        assertEquals("SNAPSHOT_REPLAY_EVENTS", job.getStage());
+    }
+
+    @Test
+    void profileAndSpanDeleteStagesIncludeSpanBeforePerformance() {
+        MonitorDataDeletionJob job = deletionJob(null);
+        job.setId(42L);
+        job.setStatus("QUEUED");
+        job.setStage("DELETE_PROFILE");
+        when(jobMapper.selectOne(any())).thenReturn(job);
+        when(jobMapper.claim(42L)).thenReturn(1);
+        when(itemMapper.selectList(any())).thenReturn(java.util.List.of());
+        when(itemMapper.selectCount(any())).thenReturn(0L);
+        ReflectionTestUtils.setField(service, "workerEnabled", true);
+
+        service.processOneBatch();
+        assertEquals("DELETE_SPAN_EVENT", job.getStage());
+        service.processOneBatch();
+        assertEquals("DELETE_PERFORMANCE", job.getStage());
+    }
+
+    @Test
     void repeatedErrorSnapshotKeepsFirstCountUnderStableIdempotencyKey() throws Exception {
         Map<String, MonitorDataDeletionItem> storedItems = new HashMap<>();
         when(itemMapper.insert(any(MonitorDataDeletionItem.class))).thenAnswer(invocation -> {
@@ -266,6 +337,7 @@ class MonitorDataDeletionServiceTest {
         job.setStatus("RUNNING");
         job.setStage("CLEAN_REDIS_DEDUP");
         when(itemMapper.selectList(any())).thenReturn(java.util.List.of());
+        when(itemMapper.selectCount(any())).thenReturn(1L);
 
         var cleanup = MonitorDataDeletionService.class.getDeclaredMethod(
                 "cleanRedisDedupBatch", MonitorDataDeletionJob.class);

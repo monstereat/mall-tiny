@@ -6,8 +6,6 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.macro.mall.tiny.modules.monitor.dto.MonitorDataDeletionRequest;
 import com.macro.mall.tiny.modules.monitor.mapper.*;
 import com.macro.mall.tiny.modules.monitor.model.*;
-import io.minio.MinioClient;
-import io.minio.RemoveObjectArgs;
 import lombok.RequiredArgsConstructor;
 import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.beans.factory.annotation.Value;
@@ -32,7 +30,11 @@ import java.util.*;
 public class MonitorDataDeletionService {
     private static final int BATCH_SIZE = 300;
     private static final String QUEUED = "QUEUED";
+    private static final String LOKI_BASELINE = "LOKI_BASELINE_ID";
+    private static final String LOKI_REQUEST = "LOKI_DELETE_REQUEST_ID";
+    private static final String LOKI_COMPLETE = "LOKI_DELETE_COMPLETE";
     private final MonitorProjectAccessService accessService;
+    private final MonitorProjectMapper projectMapper;
     private final MonitorDataDeletionJobMapper jobMapper;
     private final MonitorDataDeletionItemMapper itemMapper;
     private final MonitorReplayMapper replayMapper;
@@ -40,8 +42,9 @@ public class MonitorDataDeletionService {
     private final MonitorDataDeletionIssueReconciler issueReconciler;
     private final MonitorErrorHourlyDeletionReconciler hourlyReconciler;
     private final MonitorDataDeletionAuditService auditService;
+    private final MonitorLokiDeletionClient lokiDeletionClient;
     private final StringRedisTemplate redis;
-    private final MinioClient minio;
+    private final MonitorReplayQuotaService replayQuotaService;
     private final ObjectMapper objectMapper;
     @Qualifier("clickHouseJdbcTemplate")
     private final JdbcTemplate clickHouse;
@@ -50,6 +53,8 @@ public class MonitorDataDeletionService {
     private String replayBucket;
     @Value("${monitor.data-deletion.worker-enabled:false}")
     private boolean workerEnabled;
+    @Value("${monitor.data-deletion.loki-poll-delay-ms:300000}")
+    private long lokiPollDelayMs;
 
     public MonitorDataDeletionJob preview(String projectKey, MonitorDataDeletionRequest request) {
         MonitorProject project = accessService.requireProjectOwner(projectKey);
@@ -68,7 +73,7 @@ public class MonitorDataDeletionService {
                     "user-scoped Replay deletion is limited to the latest 14 days because older Replay events no longer retain their userId association; narrow the date range or omit userId");
         }
         Map<String, Object> counts = new LinkedHashMap<>();
-        for (String table : List.of("error_event", "performance_event", "behavior_event", "replay_event", "metric_event", "profile_event")) {
+        for (String table : List.of("error_event", "performance_event", "behavior_event", "replay_event", "metric_event", "profile_event", "span_event")) {
             counts.put(table, countEvents(table, project.getProjectKey(), from, to, userId));
         }
         if (userId == null) {
@@ -81,7 +86,8 @@ public class MonitorDataDeletionService {
             counts.put("replayObjects", counts.get("replay_event"));
             counts.put("replayObjectsCountSemantics", "exact for the selected 14-day retention window");
         }
-        counts.put("countSemantics", "preview counts are exact when generated; execution snapshots records persisted through job start and excludes later arrivals");
+        counts.put("lokiLogs", "asynchronous; matched by project, user when provided, and time range");
+        counts.put("countSemantics", "preview counts are exact when generated; execution snapshots records persisted through job start and excludes later arrivals; Loki logs are submitted asynchronously and reported separately");
         String token = sha256(project.getId() + ":" + from + ":" + to + ":" + userId + ":" + UUID.randomUUID());
         MonitorDataDeletionJob job = new MonitorDataDeletionJob();
         job.setProjectId(project.getId());
@@ -101,6 +107,13 @@ public class MonitorDataDeletionService {
     @Transactional
     public MonitorDataDeletionJob execute(String projectKey, Long previewId, String token) {
         MonitorProject project = accessService.requireProjectOwner(projectKey);
+        if (projectMapper.lockProject(project.getId()) == null) {
+            throw new ResponseStatusException(HttpStatus.NOT_FOUND, "project not found");
+        }
+        if (jobMapper.countActiveForProject(project.getId()) > 0) {
+            throw new ResponseStatusException(HttpStatus.CONFLICT,
+                    "another data deletion job is already active for this project");
+        }
         MonitorDataDeletionJob job = requireJob(project, previewId);
         boolean expired = job.getCreateTime() == null || job.getCreateTime().toInstant().isBefore(Instant.now().minus(Duration.ofMinutes(30)));
         if (!"PREVIEW".equals(job.getStatus()) || expired || !MessageDigest.isEqual(
@@ -143,7 +156,8 @@ public class MonitorDataDeletionService {
         if (job == null) return;
         if (jobMapper.claim(job.getId()) != 1) return;
         job.setStatus("RUNNING");
-        job.setLeaseUntil(Date.from(Instant.now().plus(Duration.ofMinutes(10))));
+        Date crashRecoveryLease = Date.from(Instant.now().plus(Duration.ofMinutes(10)));
+        job.setLeaseUntil(crashRecoveryLease);
         try {
             if (job.getStartedAt() == null) {
                 job.setStartedAt(new Date());
@@ -154,12 +168,14 @@ public class MonitorDataDeletionService {
                 case "SNAPSHOT_PERFORMANCE_EVENTS" -> snapshotEventBatch(job, "performance_event", "SNAPSHOT_BEHAVIOR_EVENTS", false);
                 case "SNAPSHOT_BEHAVIOR_EVENTS" -> snapshotEventBatch(job, "behavior_event", "SNAPSHOT_METRIC_EVENTS", false);
                 case "SNAPSHOT_METRIC_EVENTS" -> snapshotEventBatch(job, "metric_event", "SNAPSHOT_PROFILE_EVENTS", false);
-                case "SNAPSHOT_PROFILE_EVENTS" -> snapshotEventBatch(job, "profile_event", "SNAPSHOT_REPLAY_EVENTS", false);
+                case "SNAPSHOT_PROFILE_EVENTS" -> snapshotEventBatch(job, "profile_event", "SNAPSHOT_SPAN_EVENTS", false);
+                case "SNAPSHOT_SPAN_EVENTS" -> snapshotEventBatch(job, "span_event", "SNAPSHOT_REPLAY_EVENTS", false);
                 case "SNAPSHOT_REPLAY_EVENTS" -> snapshotEventBatch(job, "replay_event", "SNAPSHOT_REPLAY_INDEXES", false);
                 case "SNAPSHOT_REPLAY_INDEXES" -> snapshotReplayIndexBatch(job);
                 case "REPLAY_OBJECTS" -> deleteReplayBatch(job);
                 case "DELETE_METRIC" -> deleteSnapshotBatch(job, "metric_event", "METRIC_EVENT", "DELETE_PROFILE");
-                case "DELETE_PROFILE" -> deleteSnapshotBatch(job, "profile_event", "PROFILE_EVENT", "DELETE_PERFORMANCE");
+                case "DELETE_PROFILE" -> deleteSnapshotBatch(job, "profile_event", "PROFILE_EVENT", "DELETE_SPAN_EVENT");
+                case "DELETE_SPAN_EVENT" -> deleteSnapshotBatch(job, "span_event", "SPAN_EVENT", "DELETE_PERFORMANCE");
                 case "DELETE_PERFORMANCE" -> deleteSnapshotBatch(job, "performance_event", "PERFORMANCE_EVENT", "DELETE_BEHAVIOR");
                 case "DELETE_BEHAVIOR" -> deleteSnapshotBatch(job, "behavior_event", "BEHAVIOR_EVENT", "DELETE_REPLAY_EVENT");
                 case "DELETE_REPLAY_EVENT" -> deleteSnapshotBatch(job, "replay_event", "REPLAY_EVENT", "DELETE_ERROR_EVENT");
@@ -167,10 +183,17 @@ public class MonitorDataDeletionService {
                 case "RECONCILE_ERROR_HOURLY" -> reconcileErrorHourly(job);
                 case "RECONCILE_ISSUES" -> reconcileIssues(job);
                 case "REBUILD_ISSUE_HLLS" -> rebuildIssueHllBatch(job);
+                case "LOKI_DELETE_BASELINE" -> snapshotLokiDeleteBaseline(job);
+                case "LOKI_DELETE_SUBMIT" -> submitLokiDelete(job);
+                case "LOKI_DELETE_DISCOVER" -> discoverLokiDeleteRequests(job);
+                case "LOKI_DELETE_POLL" -> pollLokiDeleteRequests(job);
                 case "CLEAN_REDIS_DEDUP" -> cleanRedisDedupBatch(job);
                 default -> throw new IllegalStateException("unknown deletion stage: " + job.getStage());
             }
-            if ("RUNNING".equals(job.getStatus())) {
+            boolean waitingForLoki = ("LOKI_DELETE_DISCOVER".equals(job.getStage()) || "LOKI_DELETE_POLL".equals(job.getStage()))
+                    && job.getLeaseUntil() != null && !job.getLeaseUntil().equals(crashRecoveryLease)
+                    && job.getLeaseUntil().after(new Date());
+            if ("RUNNING".equals(job.getStatus()) && !waitingForLoki) {
                 job.setStatus(QUEUED);
                 job.setLeaseUntil(null);
                 jobMapper.updateById(job);
@@ -221,7 +244,7 @@ public class MonitorDataDeletionService {
         for (MonitorDataDeletionItem item : items) {
             MonitorReplay replay = replayMapper.selectById(Long.parseLong(item.getItemValue()));
             if (replay != null) {
-                minio.removeObject(RemoveObjectArgs.builder().bucket(replayBucket).object(replay.getObjectKey()).build());
+                replayQuotaService.removeObject(replayBucket, job.getProjectKey(), replay.getObjectKey());
                 replayMapper.deleteById(replay.getId());
             }
             cursor = item.getId();
@@ -335,14 +358,206 @@ public class MonitorDataDeletionService {
         }
         if (fingerprints.size() < 100) {
             job.setCursorValue(null);
-            job.setStage("CLEAN_REDIS_DEDUP");
+            job.setStage("LOKI_DELETE_BASELINE");
         } else {
             job.setCursorValue(Long.toString(cursor));
         }
         jobMapper.updateById(job);
     }
 
+    private void snapshotLokiDeleteBaseline(MonitorDataDeletionJob job) {
+        if (!hasLokiDeleteRange(job)) {
+            saveItem(job.getId(), LOKI_COMPLETE, "processed");
+            job.setCursorValue(null);
+            job.setStage("CLEAN_REDIS_DEDUP");
+            jobMapper.updateById(job);
+            return;
+        }
+        String query = lokiDeleteQuery(job);
+        for (MonitorLokiDeleteRequest request : lokiDeletionClient.listRequests()) {
+            if (matchesLokiRequest(request, job, query)) {
+                saveItem(job.getId(), LOKI_BASELINE, request.requestId());
+            }
+        }
+        job.setCursorValue(null);
+        job.setStage("LOKI_DELETE_SUBMIT");
+        jobMapper.updateById(job);
+    }
+
+    private void submitLokiDelete(MonitorDataDeletionJob job) {
+        reconcileLokiDeleteCoverage(job, lokiDeletionClient.listRequests());
+    }
+
+    private void discoverLokiDeleteRequests(MonitorDataDeletionJob job) {
+        reconcileLokiDeleteCoverage(job, lokiDeletionClient.listRequests());
+    }
+
+    private void pollLokiDeleteRequests(MonitorDataDeletionJob job) {
+        List<MonitorLokiDeleteRequest> listed = lokiDeletionClient.listRequests();
+        List<MonitorLokiDeleteRequest> requests = untrackedMatchingRequests(job, listed);
+        persistLokiRequests(job, requests);
+        List<MonitorLokiDeleteRequest> tracked = allTrackedLokiRequests(job, listed, requests);
+        if (!coversLokiRange(job, tracked)) {
+            job.setStage("LOKI_DELETE_DISCOVER");
+            submitMissingLokiRanges(job, tracked);
+            deferLokiPoll(job);
+            return;
+        }
+        if (tracked.stream().anyMatch(request -> !"processed".equalsIgnoreCase(request.status()))) {
+            deferLokiPoll(job);
+            return;
+        }
+        job.setStage("CLEAN_REDIS_DEDUP");
+        saveItem(job.getId(), LOKI_COMPLETE, "processed");
+        job.setCursorValue(null);
+        job.setLeaseUntil(null);
+        jobMapper.updateById(job);
+    }
+
+    private void reconcileLokiDeleteCoverage(MonitorDataDeletionJob job, List<MonitorLokiDeleteRequest> listed) {
+        List<MonitorLokiDeleteRequest> requests = untrackedMatchingRequests(job, listed);
+        persistLokiRequests(job, requests);
+        List<MonitorLokiDeleteRequest> tracked = allTrackedLokiRequests(job, listed, requests);
+        if (coversLokiRange(job, tracked)) {
+            job.setStage("LOKI_DELETE_POLL");
+            job.setCursorValue(null);
+            job.setLeaseUntil(null);
+            jobMapper.updateById(job);
+            return;
+        }
+
+        job.setStage("LOKI_DELETE_DISCOVER");
+        job.setCursorValue(null);
+        submitMissingLokiRanges(job, tracked);
+        deferLokiPoll(job);
+    }
+
+    private void submitMissingLokiRanges(MonitorDataDeletionJob job, List<MonitorLokiDeleteRequest> requests) {
+        for (LokiDeleteRange range : missingLokiRanges(job, requests)) {
+            lokiDeletionClient.submitDelete(lokiDeleteQuery(job), range.start(), range.end());
+        }
+    }
+
+    private void deferLokiPoll(MonitorDataDeletionJob job) {
+        long delay = Math.max(30_000L, lokiPollDelayMs);
+        job.setStatus("RUNNING");
+        job.setLeaseUntil(Date.from(Instant.now().plusMillis(delay)));
+        jobMapper.updateById(job);
+    }
+
+    private List<MonitorLokiDeleteRequest> untrackedMatchingRequests(
+            MonitorDataDeletionJob job, List<MonitorLokiDeleteRequest> requests) {
+        Set<String> excluded = new HashSet<>(lokiRequestIds(job, LOKI_BASELINE));
+        Set<String> tracked = new HashSet<>(lokiRequestIds(job, LOKI_REQUEST));
+        excluded.addAll(tracked);
+        String query = lokiDeleteQuery(job);
+        return requests.stream()
+                .filter(request -> matchesLokiRequest(request, job, query))
+                .filter(request -> !excluded.contains(request.requestId()))
+                .toList();
+    }
+
+    private List<MonitorLokiDeleteRequest> allTrackedLokiRequests(
+            MonitorDataDeletionJob job, List<MonitorLokiDeleteRequest> listedRequests) {
+        return allTrackedLokiRequests(job, listedRequests, List.of());
+    }
+
+    private List<MonitorLokiDeleteRequest> allTrackedLokiRequests(
+            MonitorDataDeletionJob job,
+            List<MonitorLokiDeleteRequest> listedRequests,
+            List<MonitorLokiDeleteRequest> newlyTrackedRequests) {
+        Set<String> ids = new HashSet<>(lokiRequestIds(job, LOKI_REQUEST));
+        String query = lokiDeleteQuery(job);
+        Map<String, MonitorLokiDeleteRequest> byId = new LinkedHashMap<>();
+        listedRequests.stream()
+                .filter(request -> ids.contains(request.requestId()) && matchesLokiRequest(request, job, query))
+                .forEach(request -> byId.put(request.requestId(), request));
+        newlyTrackedRequests.stream()
+                .filter(request -> matchesLokiRequest(request, job, query))
+                .forEach(request -> byId.put(request.requestId(), request));
+        return List.copyOf(byId.values());
+    }
+
+    private List<String> lokiRequestIds(MonitorDataDeletionJob job, String itemType) {
+        return itemMapper.selectList(Wrappers.<MonitorDataDeletionItem>lambdaQuery()
+                        .eq(MonitorDataDeletionItem::getJobId, job.getId())
+                        .eq(MonitorDataDeletionItem::getItemType, itemType)
+                        .orderByAsc(MonitorDataDeletionItem::getId))
+                .stream().map(MonitorDataDeletionItem::getItemValue).toList();
+    }
+
+    private void persistLokiRequests(MonitorDataDeletionJob job, List<MonitorLokiDeleteRequest> requests) {
+        for (MonitorLokiDeleteRequest request : requests) {
+            if (StringUtils.hasText(request.requestId())) saveItem(job.getId(), LOKI_REQUEST, request.requestId());
+        }
+    }
+
+    private boolean matchesLokiRequest(MonitorLokiDeleteRequest request, MonitorDataDeletionJob job, String query) {
+        if (!StringUtils.hasText(request.requestId()) || !query.equals(request.query())
+                || request.start() == null || request.end() == null) return false;
+        Instant rangeStart = job.getRangeStart().toInstant();
+        Instant rangeEnd = lokiRangeEnd(job);
+        return !request.start().isBefore(rangeStart) && !request.end().isAfter(rangeEnd)
+                && request.start().isBefore(request.end());
+    }
+
+    private boolean coversLokiRange(MonitorDataDeletionJob job, List<MonitorLokiDeleteRequest> requests) {
+        return missingLokiRanges(job, requests).isEmpty();
+    }
+
+    private List<LokiDeleteRange> missingLokiRanges(
+            MonitorDataDeletionJob job, List<MonitorLokiDeleteRequest> requests) {
+        List<MonitorLokiDeleteRequest> ordered = requests.stream()
+                .sorted(Comparator.comparing(MonitorLokiDeleteRequest::start)).toList();
+        Instant coveredUntil = job.getRangeStart().toInstant();
+        List<LokiDeleteRange> missing = new ArrayList<>();
+        for (MonitorLokiDeleteRequest request : ordered) {
+            if (request.start().isAfter(coveredUntil)) {
+                missing.add(new LokiDeleteRange(coveredUntil, request.start()));
+            }
+            if (request.end().isAfter(coveredUntil)) coveredUntil = request.end();
+            if (!coveredUntil.isBefore(lokiRangeEnd(job))) return missing;
+        }
+        if (coveredUntil.isBefore(lokiRangeEnd(job))) {
+            missing.add(new LokiDeleteRange(coveredUntil, lokiRangeEnd(job)));
+        }
+        return missing;
+    }
+
+    private record LokiDeleteRange(Instant start, Instant end) {}
+
+    private String lokiDeleteQuery(MonitorDataDeletionJob job) {
+        String query = "{service_name=\"observability-platform\"} | monitor_project=" + logqlQuote(job.getProjectKey());
+        if (StringUtils.hasText(job.getUserId())) query += " | monitor_user_id=" + logqlQuote(job.getUserId());
+        return query;
+    }
+
+    private boolean hasLokiDeleteRange(MonitorDataDeletionJob job) {
+        return job.getRangeStart() != null && job.getStartedAt() != null
+                && job.getRangeStart().toInstant().isBefore(lokiRangeEnd(job));
+    }
+
+    private Instant lokiRangeEnd(MonitorDataDeletionJob job) {
+        Instant requestedEnd = job.getRangeEnd().toInstant();
+        Instant startedAt = job.getStartedAt().toInstant();
+        return requestedEnd.isBefore(startedAt) ? requestedEnd : startedAt;
+    }
+
+    private String logqlQuote(String value) {
+        return "\"" + value.replace("\\", "\\\\").replace("\"", "\\\"")
+                .replace("\r", "\\r").replace("\n", "\\n") + "\"";
+    }
+
     private void cleanRedisDedupBatch(MonitorDataDeletionJob job) {
+        Long lokiComplete = itemMapper.selectCount(Wrappers.<MonitorDataDeletionItem>lambdaQuery()
+                .eq(MonitorDataDeletionItem::getJobId, job.getId())
+                .eq(MonitorDataDeletionItem::getItemType, LOKI_COMPLETE));
+        if (lokiComplete == null || lokiComplete == 0) {
+            job.setCursorValue(null);
+            job.setStage("LOKI_DELETE_BASELINE");
+            jobMapper.updateById(job);
+            return;
+        }
         long cursor = parseCursor(job.getCursorValue());
         List<MonitorDataDeletionItem> eventIds = itemMapper.selectList(Wrappers.<MonitorDataDeletionItem>lambdaQuery()
                 .eq(MonitorDataDeletionItem::getJobId, job.getId()).in(MonitorDataDeletionItem::getItemType,

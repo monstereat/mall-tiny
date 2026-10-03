@@ -192,6 +192,14 @@ watch(() => projects.currentKey, load, { immediate: true });
     <div class="panel">
       <h3>告警规则</h3>
       <el-alert
+        title="Issue 首发与回归通知"
+        description="分别创建 new_issue 和 issue_regression 告警规则并配置通知路由或 Webhook。Issue 首次创建或从 resolved 回归时各触发一次；事件去重、Issue 级串行处理和现有静默可避免重复通知。阈值、窗口、持续时间和 cooldown 不参与这两类事件通知。"
+        type="info"
+        :closable="false"
+        show-icon
+        style="margin-bottom: 12px"
+      />
+      <el-alert
         title="Cron Monitor 告警"
         description="将 Metric 设为 cron_unhealthy_count，即可统计项目内处于 warning 或 error 的启用 Cron 监控，并复用当前告警规则的静默、恢复和 Webhook 投递。"
         type="info"
@@ -270,6 +278,8 @@ watch(() => projects.currentKey, load, { immediate: true });
         <el-form-item label="Metric">
           <el-select v-model="form.metric" filterable allow-create default-first-option style="width:100%">
             <el-option label="Error Count" value="error_count" />
+            <el-option label="New Issue" value="new_issue" />
+            <el-option label="Issue Regression" value="issue_regression" />
             <el-option label="API Failure Count" value="api_failure_count" />
             <el-option label="Log Error Count" value="log_error_count" />
             <el-option label="Cron Unhealthy Count" value="cron_unhealthy_count" />

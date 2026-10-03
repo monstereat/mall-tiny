@@ -34,6 +34,7 @@ function logout() {
         <el-menu-item index="/apis">API</el-menu-item>
         <el-menu-item index="/issues">Issues</el-menu-item>
         <el-menu-item index="/logs">Logs</el-menu-item>
+        <el-menu-item index="/traces">Traces</el-menu-item>
         <el-menu-item index="/releases">Releases</el-menu-item>
         <el-menu-item index="/replays">Session Replay</el-menu-item>
         <el-menu-item index="/alerts">Alerts</el-menu-item>

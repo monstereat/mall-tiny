@@ -26,6 +26,11 @@ ALTER TABLE monitor.profile_event MODIFY TTL
     event_time + INTERVAL 7 DAY TO VOLUME 'cold',
     event_time + INTERVAL 30 DAY DELETE;
 
+ALTER TABLE monitor.span_event MODIFY SETTING storage_policy = 'monitor_hot_cold';
+ALTER TABLE monitor.span_event MODIFY TTL
+    event_time + INTERVAL 7 DAY TO VOLUME 'cold',
+    event_time + INTERVAL 30 DAY DELETE;
+
 ALTER TABLE monitor.replay_event MODIFY SETTING storage_policy = 'monitor_hot_cold';
 ALTER TABLE monitor.replay_event MODIFY TTL
     event_time + INTERVAL 7 DAY TO VOLUME 'cold',

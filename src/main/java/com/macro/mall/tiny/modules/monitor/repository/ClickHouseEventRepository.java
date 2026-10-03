@@ -84,6 +84,7 @@ public class ClickHouseEventRepository {
             case REPLAY -> "replay_event";
             case METRIC -> "metric_event";
             case PROFILE -> "profile_event";
+            case SPAN -> "span_event";
         };
     }
 

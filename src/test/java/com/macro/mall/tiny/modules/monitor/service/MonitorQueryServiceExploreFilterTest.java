@@ -14,6 +14,7 @@ import org.springframework.jdbc.core.JdbcTemplate;
 
 import java.util.Arrays;
 import java.util.List;
+import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -91,6 +92,44 @@ class MonitorQueryServiceExploreFilterTest {
         }
         assertEquals(101, args.get(12));
         assertEquals(0, args.get(13));
+    }
+
+    @Test
+    void loadsDistinctUserIdsBySignalWithProjectAndTimeFiltersAndHardLimit() {
+        when(clickHouse.queryForList(anyString(), any(Object[].class))).thenReturn(List.of(
+                Map.of("signal", "error", "user_id", "u1"),
+                Map.of("signal", "performance", "user_id", "u2")));
+
+        var users = service.exploreUniqueUsersBySignal(project("store-a"), 24, "production", "web-1",
+                "0123456789abcdef0123456789abcdef", "level:error", "u1", "region", "east");
+
+        assertEquals(java.util.Set.of("u1"), users.get("error"));
+        assertEquals(java.util.Set.of("u2"), users.get("performance"));
+        ArgumentCaptor<String> sqlCaptor = ArgumentCaptor.forClass(String.class);
+        ArgumentCaptor<Object[]> argsCaptor = ArgumentCaptor.forClass(Object[].class);
+        verify(clickHouse).queryForList(sqlCaptor.capture(), argsCaptor.capture());
+        assertTrue(sqlCaptor.getValue().contains("GROUP BY signal,user_id LIMIT ?"));
+        assertTrue(sqlCaptor.getValue().contains("user_id!=''"));
+        assertEquals(MonitorQueryService.EXPLORE_UNIQUE_USER_LIMIT + 1,
+                argsCaptor.getValue()[argsCaptor.getValue().length - 1]);
+        assertEquals(6, count(sqlCaptor.getValue(), "project_id=?"));
+        assertEquals(6, count(sqlCaptor.getValue(), "user_id=?"));
+    }
+
+    @Test
+    void rejectsClickHouseUniqueUserResultAboveLimit() {
+        List<java.util.Map<String, Object>> rows = java.util.stream.IntStream
+                .range(0, MonitorQueryService.EXPLORE_UNIQUE_USER_LIMIT + 1)
+                .mapToObj(i -> java.util.Map.<String, Object>of("signal", "error", "user_id", "u" + i))
+                .toList();
+        when(clickHouse.queryForList(anyString(), any(Object[].class))).thenReturn(rows);
+
+        org.springframework.web.server.ResponseStatusException exception = assertThrows(
+                org.springframework.web.server.ResponseStatusException.class,
+                () -> service.exploreUniqueUsersBySignal(project("store-a"), 24, null, null, null,
+                        null, null, null, null));
+
+        assertEquals(422, exception.getStatusCode().value());
     }
 
     @Test

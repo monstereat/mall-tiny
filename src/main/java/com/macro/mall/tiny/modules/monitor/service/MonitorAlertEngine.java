@@ -45,7 +45,7 @@ public class MonitorAlertEngine {
                         .eq(MonitorAlertRule::getEnabled, 1)
         );
         for (MonitorAlertRule rule : rules) {
-            if (isLogErrorMetric(rule)) continue;
+            if (isLogErrorMetric(rule) || isIssueEventMetric(rule)) continue;
             recordObservation(rule, event);
             evaluateRule(rule, project, fingerprint, System.currentTimeMillis());
         }
@@ -58,7 +58,7 @@ public class MonitorAlertEngine {
         );
         long now = System.currentTimeMillis();
         for (MonitorAlertRule rule : rules) {
-            if (isLogErrorMetric(rule)) continue;
+            if (isLogErrorMetric(rule) || isIssueEventMetric(rule)) continue;
             MonitorProject project = projectMapper.selectById(rule.getProjectId());
             if (project != null && Integer.valueOf(1).equals(project.getStatus())) {
                 evaluateRule(rule, project, null, now);
@@ -221,6 +221,11 @@ public class MonitorAlertEngine {
 
     private boolean isLogErrorMetric(MonitorAlertRule rule) {
         return "log_error_count".equalsIgnoreCase(rule.getMetric());
+    }
+
+    private boolean isIssueEventMetric(MonitorAlertRule rule) {
+        return "new_issue".equalsIgnoreCase(rule.getMetric())
+                || "issue_regression".equalsIgnoreCase(rule.getMetric());
     }
 
     private boolean matches(BigDecimal value, String operator, BigDecimal threshold) {

@@ -93,7 +93,8 @@ public class JwtTokenUtil {
      */
     public boolean validateToken(String token, UserDetails userDetails) {
         String username = getUserNameFromToken(token);
-        return username != null && username.equals(userDetails.getUsername()) && !isTokenExpired(token);
+        return userDetails.isEnabled() && username != null && username.equals(userDetails.getUsername())
+                && !isTokenExpired(token);
     }
 
     /**
@@ -145,12 +146,16 @@ public class JwtTokenUtil {
     }
 
     public String generateSamlToken(UserDetails userDetails, String tenantKey, String subject) {
+        return generateSamlToken(userDetails, tenantKey, subject, System.currentTimeMillis());
+    }
+
+    public String generateSamlToken(UserDetails userDetails, String tenantKey, String subject, long issuedAt) {
         Map<String, Object> claims = new HashMap<>();
         claims.put(CLAIM_KEY_USERNAME, userDetails.getUsername());
         claims.put(CLAIM_KEY_CREATED, new Date());
         claims.put("saml_tenant", tenantKey);
         claims.put("saml_subject", subject);
-        claims.put("saml_issued_at", System.currentTimeMillis());
+        claims.put("saml_issued_at", issuedAt);
         return generateToken(claims);
     }
 

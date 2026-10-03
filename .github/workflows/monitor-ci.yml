@@ -18,8 +18,10 @@ jobs:
           java-version: '17'
           cache: maven
 
-      - name: Java compile and tests
-        run: mvn -B test
+      - name: Java tests with default and production Spring profiles
+        run: |
+          mvn -B test
+          mvn -B -Dspring.profiles.active=prod test
 
       - uses: actions/setup-node@v4
         with:
@@ -105,6 +107,9 @@ jobs:
 
       - name: Verify browser API and Kafka trace
         run: pnpm --dir monitor/demo test:e2e:trace --grep "browser API probe"
+
+      - name: Verify project OTLP server span query
+        run: pnpm --dir monitor/demo test:e2e:trace --grep "project OTLP server span"
 
       - name: Verify Issue auto-regression from browser error
         run: pnpm --dir monitor/demo test:e2e:trace --grep "real browser error reopens"

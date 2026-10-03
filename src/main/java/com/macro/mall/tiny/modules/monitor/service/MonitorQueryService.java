@@ -2,6 +2,7 @@ package com.macro.mall.tiny.modules.monitor.service;
 
 import com.baomidou.mybatisplus.core.metadata.IPage;
 import com.baomidou.mybatisplus.core.toolkit.Wrappers;
+import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
 import com.baomidou.mybatisplus.extension.plugins.pagination.Page;
 import com.macro.mall.tiny.modules.monitor.mapper.*;
 import com.macro.mall.tiny.modules.monitor.model.*;
@@ -9,6 +10,8 @@ import com.macro.mall.tiny.modules.monitor.dto.MonitorExploreResult;
 import com.macro.mall.tiny.modules.monitor.dto.MonitorExploreAggregationResult;
 import com.macro.mall.tiny.modules.monitor.dto.MonitorMetricFormulaRequest;
 import com.macro.mall.tiny.modules.monitor.dto.MonitorMetricFormulaResult;
+import com.macro.mall.tiny.modules.monitor.dto.MonitorTraceOverview;
+import com.macro.mall.tiny.modules.monitor.dto.MonitorTraceSpan;
 import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.stereotype.Service;
@@ -24,11 +27,16 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.Objects;
 import java.util.Set;
 import java.util.TreeMap;
 
 @Service
 public class MonitorQueryService {
+
+    public static final int EXPLORE_UNIQUE_USER_LIMIT = 10_000;
+    private static final int ISSUE_FILTER_FINGERPRINT_LIMIT = 10_000;
+    private static final int ISSUE_QUERY_MAX_LENGTH = 128;
 
     private record EventFilter(String clause, Object[] args) {
     }
@@ -121,6 +129,121 @@ public class MonitorQueryService {
         return result;
     }
 
+    public IPage<MonitorTraceOverview> traces(
+            MonitorProject project,
+            int hours,
+            String environment,
+            String release,
+            long pageNum,
+            long pageSize) {
+        int safeHours = Math.max(1, Math.min(24 * 365, hours));
+        long safePageNum = Math.max(1, pageNum);
+        long safePageSize = Math.max(1, Math.min(100, pageSize));
+        Timestamp since = Timestamp.from(Instant.now().minus(safeHours, ChronoUnit.HOURS));
+        List<Object> args = new ArrayList<>();
+        String union = traceEventUnion(project, since, environment, release, args);
+        String grouped = "SELECT trace_id FROM (" + union + ") GROUP BY trace_id";
+        Long total = clickHouse.queryForObject("SELECT count() FROM (" + grouped + ")", Long.class,
+                args.toArray());
+
+        List<Object> rowsArgs = new ArrayList<>();
+        String rowsUnion = traceEventUnion(project, since, environment, release, rowsArgs);
+        rowsArgs.add(safePageSize);
+        rowsArgs.add((safePageNum - 1) * safePageSize);
+        List<MonitorTraceOverview> records = clickHouse.queryForList(
+                        "SELECT trace_id AS traceId,min(event_time) AS firstEventAt,max(event_time) AS lastEventAt," +
+                                "count() AS eventCount,argMax(environment,event_time) AS environment," +
+                                "argMax(release,event_time) AS release," +
+                                "arrayStringConcat(arraySort(groupUniqArray(signal_type)), ',') AS signalTypes " +
+                                "FROM (" + rowsUnion + ") GROUP BY trace_id " +
+                                "ORDER BY lastEventAt DESC,traceId DESC LIMIT ? OFFSET ?",
+                        rowsArgs.toArray())
+                .stream()
+                .map(row -> new MonitorTraceOverview(
+                        String.valueOf(row.get("traceId")),
+                        (Timestamp) row.get("firstEventAt"),
+                        (Timestamp) row.get("lastEventAt"),
+                        ((Number) row.get("eventCount")).longValue(),
+                        (String) row.get("environment"),
+                        (String) row.get("release"),
+                        (String) row.get("signalTypes")))
+                .toList();
+
+        Page<MonitorTraceOverview> page = new Page<>(safePageNum, safePageSize);
+        page.setTotal(total == null ? 0 : total);
+        page.setRecords(records);
+        return page;
+    }
+
+    public List<MonitorTraceSpan> traceSpans(MonitorProject project, String traceId) {
+        return clickHouse.queryForList(
+                        "SELECT trace_id AS traceId,JSONExtractString(payload,'data','spanId') AS spanId," +
+                                "JSONExtractString(payload,'data','parentSpanId') AS parentSpanId," +
+                                "JSONExtractString(payload,'data','op') AS op," +
+                                "JSONExtractString(payload,'data','serviceName') AS serviceName," +
+                                "JSONExtractString(payload,'data','description') AS description," +
+                                "JSONExtractUInt(payload,'data','startTime') AS startTime," +
+                                "JSONExtractFloat(payload,'data','durationMs') AS durationMs," +
+                                "JSONExtractString(payload,'data','status') AS status," +
+                                "if(JSONHas(payload,'data','statusCode'),JSONExtractInt(payload,'data','statusCode')," +
+                        "CAST(NULL AS Nullable(Int64))) AS statusCode " +
+                                "FROM monitor.span_event WHERE project_id=? AND trace_id=? " +
+                                "ORDER BY startTime,spanId LIMIT 2000",
+                        project.getProjectKey(), traceId)
+                .stream()
+                .map(row -> new MonitorTraceSpan(
+                        String.valueOf(row.get("traceId")),
+                        String.valueOf(row.get("spanId")),
+                        Objects.toString(row.get("parentSpanId"), ""),
+                        Objects.toString(row.get("op"), "").startsWith("otel.") ? "server" : "browser",
+                        Objects.toString(row.get("serviceName"), ""),
+                        otelSpanKind(Objects.toString(row.get("op"), "")),
+                        Objects.toString(row.get("op"), ""),
+                        Objects.toString(row.get("description"), ""),
+                        ((Number) row.get("startTime")).longValue(),
+                        ((Number) row.get("durationMs")).doubleValue(),
+                        Objects.toString(row.get("status"), ""),
+                        row.get("statusCode") instanceof Number code ? code.longValue() : null))
+                .toList();
+    }
+
+    private String otelSpanKind(String op) {
+        return op.startsWith("otel.") ? op.substring("otel.".length()) : "";
+    }
+
+    private String traceEventUnion(
+            MonitorProject project,
+            Timestamp since,
+            String environment,
+            String release,
+            List<Object> args) {
+        Map<String, String> tables = Map.of(
+                "error", "monitor.error_event",
+                "performance", "monitor.performance_event",
+                "behavior", "monitor.behavior_event",
+                "replay", "monitor.replay_event",
+                "metric", "monitor.metric_event",
+                "profile", "monitor.profile_event",
+                "span", "monitor.span_event");
+        List<String> selects = new ArrayList<>();
+        for (Map.Entry<String, String> table : tables.entrySet()) {
+            StringBuilder where = new StringBuilder(" WHERE project_id=? AND trace_id!='' AND event_time>=?");
+            args.add(project.getProjectKey());
+            args.add(since);
+            if (StringUtils.hasText(environment)) {
+                where.append(" AND environment=?");
+                args.add(environment);
+            }
+            if (StringUtils.hasText(release)) {
+                where.append(" AND release=?");
+                args.add(release);
+            }
+            selects.add("SELECT trace_id,event_time,environment,release,'" + table.getKey() +
+                    "' AS signal_type FROM " + table.getValue() + where);
+        }
+        return String.join(" UNION ALL ", selects);
+    }
+
     public IPage<MonitorIssue> issues(
             Long projectId,
             long pageNum,
@@ -128,22 +251,138 @@ public class MonitorQueryService {
             String status,
             int hours,
             String release) {
+        return issues(projectId, pageNum, pageSize, status, hours, release, null);
+    }
+
+    public IPage<MonitorIssue> issues(
+            Long projectId,
+            long pageNum,
+            long pageSize,
+            String status,
+            int hours,
+            String release,
+            String sort) {
+        return issues(projectId, null, pageNum, pageSize, status, hours, release, sort, null, null);
+    }
+
+    public IPage<MonitorIssue> issues(
+            MonitorProject project,
+            long pageNum,
+            long pageSize,
+            String status,
+            int hours,
+            String release,
+            String sort,
+            String query,
+            String environment) {
+        return issues(project.getId(), project.getProjectKey(), pageNum, pageSize, status, hours,
+                release, sort, query, environment);
+    }
+
+    private IPage<MonitorIssue> issues(
+            Long projectId,
+            String projectKey,
+            long pageNum,
+            long pageSize,
+            String status,
+            int hours,
+            String release,
+            String sort,
+            String queryString,
+            String environment) {
         int safeHours = Math.max(1, Math.min(24 * 365, hours));
         Date since = Date.from(Instant.now().minus(safeHours, ChronoUnit.HOURS));
+        String keyword = normalizeIssueQuery(queryString);
+        String normalizedEnvironment = normalizeIssueEnvironment(environment);
 
-        var query = Wrappers.<MonitorIssue>lambdaQuery()
+        LambdaQueryWrapper<MonitorIssue> query = Wrappers.<MonitorIssue>lambdaQuery()
                 .eq(MonitorIssue::getProjectId, projectId)
-                .ge(MonitorIssue::getLastSeen, since)
-                .orderByDesc(MonitorIssue::getLastSeen);
-        if (StringUtils.hasText(status)) {
-            query.eq(MonitorIssue::getStatus, status);
+                .ge(MonitorIssue::getLastSeen, since);
+        if (normalizedEnvironment != null) {
+            List<String> fingerprints = issueFingerprints(
+                    projectKey, since, normalizedEnvironment, release, null);
+            if (fingerprints.isEmpty()) return new Page<>(pageNum, pageSize, 0);
+            query.in(MonitorIssue::getFingerprint, fingerprints);
         }
-        if (StringUtils.hasText(release)) {
-            query.eq(MonitorIssue::getLatestRelease, release);
+        if (keyword != null) {
+            List<String> messageFingerprints = issueFingerprints(
+                    projectKey, since, normalizedEnvironment, release, keyword);
+            query.and(filter -> {
+                filter.like(MonitorIssue::getTitle, keyword)
+                        .or().like(MonitorIssue::getFingerprint, keyword);
+                if (!messageFingerprints.isEmpty()) {
+                    filter.or().in(MonitorIssue::getFingerprint, messageFingerprints);
+                }
+            });
         }
+        applyIssueSort(query, sort);
+        if (StringUtils.hasText(status)) query.eq(MonitorIssue::getStatus, status);
+        if (StringUtils.hasText(release)) query.eq(MonitorIssue::getLatestRelease, release);
         IPage<MonitorIssue> page = issueMapper.selectPage(Page.of(pageNum, pageSize), query);
         enrichIssueTriage(projectId, page.getRecords(), release);
         return page;
+    }
+
+    private String normalizeIssueQuery(String query) {
+        if (!StringUtils.hasText(query)) return null;
+        String normalized = query.trim();
+        if (normalized.length() > ISSUE_QUERY_MAX_LENGTH) {
+            throw new org.springframework.web.server.ResponseStatusException(
+                    org.springframework.http.HttpStatus.BAD_REQUEST,
+                    "Issue search query must be at most 128 characters");
+        }
+        return normalized;
+    }
+
+    private String normalizeIssueEnvironment(String environment) {
+        if (!StringUtils.hasText(environment)) return null;
+        String normalized = environment.trim();
+        if (normalized.length() > ISSUE_QUERY_MAX_LENGTH) {
+            throw new org.springframework.web.server.ResponseStatusException(
+                    org.springframework.http.HttpStatus.BAD_REQUEST,
+                    "Issue environment must be at most 128 characters");
+        }
+        return normalized;
+    }
+
+    private List<String> issueFingerprints(
+            String projectKey, Date since, String environment, String release, String messageQuery) {
+        StringBuilder sql = new StringBuilder("SELECT DISTINCT fingerprint FROM monitor.error_event " +
+                "WHERE project_id=? AND event_time>=? AND fingerprint!=''");
+        List<Object> args = new ArrayList<>(List.of(projectKey, new Timestamp(since.getTime())));
+        if (StringUtils.hasText(environment)) {
+            sql.append(" AND environment=?");
+            args.add(environment);
+        }
+        if (StringUtils.hasText(release)) {
+            sql.append(" AND release=?");
+            args.add(release);
+        }
+        if (StringUtils.hasText(messageQuery)) {
+            sql.append(" AND (positionCaseInsensitiveUTF8(JSONExtractString(payload,'data','message'),?)>0 " +
+                    "OR positionCaseInsensitiveUTF8(JSONExtractString(payload,'data','name'),?)>0)");
+            args.add(messageQuery);
+            args.add(messageQuery);
+        }
+        sql.append(" LIMIT ?");
+        args.add(ISSUE_FILTER_FINGERPRINT_LIMIT + 1);
+        List<String> fingerprints = clickHouse.queryForList(sql.toString(), String.class, args.toArray());
+        if (fingerprints.size() > ISSUE_FILTER_FINGERPRINT_LIMIT) {
+            throw new org.springframework.web.server.ResponseStatusException(
+                    org.springframework.http.HttpStatus.UNPROCESSABLE_ENTITY,
+                    "Issue filter matched more than 10,000 fingerprints; narrow the time range or filter");
+        }
+        return fingerprints;
+    }
+
+    private void applyIssueSort(LambdaQueryWrapper<MonitorIssue> query, String sort) {
+        if ("eventCount".equals(sort)) {
+            query.orderByDesc(MonitorIssue::getEventCount);
+        } else if ("affectedUsers".equals(sort)) {
+            query.orderByDesc(MonitorIssue::getAffectedUsers);
+        }
+        query.orderByDesc(MonitorIssue::getLastSeen)
+                .orderByDesc(MonitorIssue::getId);
     }
 
     private void enrichIssueTriage(Long projectId, List<MonitorIssue> issues, String release) {
@@ -351,7 +590,7 @@ public class MonitorQueryService {
             int limit,
             int offset) {
         int safeHours = Math.max(1, Math.min(24 * 90, hours));
-        int safeLimit = Math.max(1, Math.min(200, limit));
+        int safeLimit = Math.max(1, Math.min(500, limit));
         int safeOffset = Math.max(0, Math.min(10000, offset));
         MonitorExploreQueryParser.Parsed parsedQuery = MonitorExploreQueryParser.parse(query);
         Timestamp since = Timestamp.from(Instant.now().minus(safeHours, ChronoUnit.HOURS));
@@ -512,6 +751,48 @@ public class MonitorQueryService {
                         "count".equals(normalizedAggregation) ? null : ((Number) row.get("aggregate_value")).doubleValue()))
                 .toList();
         return new MonitorExploreAggregationResult(normalizedGroupBy, normalizedAggregation, normalizedField, buckets);
+    }
+
+    public Map<String, Set<String>> exploreUniqueUsersBySignal(
+            MonitorProject project, int hours, String environment, String release, String traceId, String query,
+            String userId, String tagKey, String tagValue) {
+        int safeHours = Math.max(1, Math.min(168, hours));
+        Timestamp since = Timestamp.from(Instant.now().minus(safeHours, ChronoUnit.HOURS));
+        MonitorExploreQueryParser.Parsed parsedQuery = MonitorExploreQueryParser.parse(query);
+        Map<String, String> tables = Map.of(
+                "error", "monitor.error_event",
+                "performance", "monitor.performance_event",
+                "behavior", "monitor.behavior_event",
+                "replay", "monitor.replay_event",
+                "metric", "monitor.metric_event",
+                "profile", "monitor.profile_event");
+        List<String> selects = new ArrayList<>();
+        List<Object> args = new ArrayList<>();
+        for (Map.Entry<String, String> entry : tables.entrySet()) {
+            StringBuilder where = new StringBuilder(" WHERE project_id=? AND event_time>=? AND user_id!=''");
+            List<Object> tableArgs = new ArrayList<>(List.of(project.getProjectKey(), since));
+            appendExploreFilters(where, tableArgs, environment, release, traceId, parsedQuery, userId, tagKey, tagValue);
+            selects.add("SELECT '" + entry.getKey() + "' AS signal,user_id FROM " + entry.getValue() + where);
+            args.addAll(tableArgs);
+        }
+        String sql = "SELECT signal,user_id FROM (" + String.join(" UNION ALL ", selects) +
+                ") GROUP BY signal,user_id LIMIT ?";
+        args.add(EXPLORE_UNIQUE_USER_LIMIT + 1);
+        List<Map<String, Object>> rows = clickHouse.queryForList(sql, args.toArray());
+        if (rows.size() > EXPLORE_UNIQUE_USER_LIMIT) {
+            throw new org.springframework.web.server.ResponseStatusException(
+                    org.springframework.http.HttpStatus.UNPROCESSABLE_ENTITY,
+                    "mixed Explore unique-user result exceeds the 10,000 signal-user limit; narrow the time range or filters");
+        }
+        Map<String, Set<String>> result = new LinkedHashMap<>();
+        for (Map<String, Object> row : rows) {
+            String signal = String.valueOf(row.get("signal"));
+            Object rawUserId = row.get("user_id");
+            if (rawUserId != null && StringUtils.hasText(String.valueOf(rawUserId))) {
+                result.computeIfAbsent(signal, ignored -> new java.util.HashSet<>()).add(String.valueOf(rawUserId));
+            }
+        }
+        return result;
     }
 
     public MonitorMetricFormulaResult exploreMetricFormula(MonitorProject project, MonitorMetricFormulaRequest request) {

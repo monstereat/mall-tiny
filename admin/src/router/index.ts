@@ -23,6 +23,7 @@ const router = createRouter({
         { path: 'issues', component: () => import('../views/Issues.vue') },
         { path: 'issues/:id', component: () => import('../views/IssueDetail.vue') },
         { path: 'logs', component: () => import('../views/Logs.vue') },
+        { path: 'traces', component: () => import('../views/Traces.vue') },
         { path: 'releases', component: () => import('../views/Releases.vue') },
         { path: 'replays', component: () => import('../views/Replays.vue') },
         { path: 'alerts', component: () => import('../views/Alerts.vue') },

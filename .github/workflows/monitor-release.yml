@@ -7,7 +7,7 @@ on:
   workflow_dispatch:
     inputs:
       release_tag:
-        description: Optional container tag (defaults to the triggering commit SHA)
+        description: Optional human-readable release label (image tags remain unique per run)
         required: false
         type: string
       deploy:
@@ -35,8 +35,13 @@ jobs:
           java-version: '17'
           cache: maven
 
-      - name: Java compile and tests
-        run: mvn -B test
+      - name: Java tests with default and production Spring profiles
+        run: |
+          mvn -B test
+          mvn -B -Dspring.profiles.active=prod test
+
+      - name: Mock release deployment and rollback flow
+        run: python3 infra/release/tests/monitor-release-deploy-harness.py
 
       - uses: actions/setup-node@v4
         with:
@@ -80,18 +85,20 @@ jobs:
           owner="$(printf '%s' "$GITHUB_REPOSITORY_OWNER" | tr '[:upper:]' '[:lower:]')"
           repository="$(printf '%s' "${GITHUB_REPOSITORY#*/}" | tr '[:upper:]' '[:lower:]')"
           if [[ -n "$RELEASE_TAG" ]]; then
-            version="$RELEASE_TAG"
+            release_label="$RELEASE_TAG"
           elif [[ "$GITHUB_REF_TYPE" == tag ]]; then
-            version="$GITHUB_REF_NAME"
+            release_label="$GITHUB_REF_NAME"
           else
-            version="sha-${GITHUB_SHA:0:12}"
+            release_label="sha-${GITHUB_SHA:0:12}"
           fi
-          if [[ ! "$version" =~ ^[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}$ ]]; then
-            echo "Invalid Docker image tag: $version" >&2
+          if [[ ! "$release_label" =~ ^[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}$ ]]; then
+            echo "Invalid release label: $release_label" >&2
             exit 1
           fi
+          version="sha-${GITHUB_SHA}-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
           {
             echo "version=$version"
+            echo "release_label=$release_label"
             echo "image_prefix=ghcr.io/$owner/$repository"
           } >> "$GITHUB_OUTPUT"
 
@@ -104,6 +111,7 @@ jobs:
         env:
           IMAGE_PREFIX: ${{ steps.meta.outputs.image_prefix }}
           IMAGE_VERSION: ${{ steps.meta.outputs.version }}
+          RELEASE_LABEL: ${{ steps.meta.outputs.release_label }}
         run: |
           set -euo pipefail
           docker buildx build \
@@ -111,15 +119,15 @@ jobs:
             --platform linux/amd64 \
             --label "org.opencontainers.image.source=${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}" \
             --label "org.opencontainers.image.revision=${GITHUB_SHA}" \
-            --label "org.opencontainers.image.version=${IMAGE_VERSION}" \
+            --label "org.opencontainers.image.version=${RELEASE_LABEL}" \
             --tag "${IMAGE_PREFIX}-server:${IMAGE_VERSION}" \
-            --tag "${IMAGE_PREFIX}-server:sha-${GITHUB_SHA:0:12}" \
             --file Dockerfile .
 
       - name: Build and publish admin image
         env:
           IMAGE_PREFIX: ${{ steps.meta.outputs.image_prefix }}
           IMAGE_VERSION: ${{ steps.meta.outputs.version }}
+          RELEASE_LABEL: ${{ steps.meta.outputs.release_label }}
         run: |
           set -euo pipefail
           docker buildx build \
@@ -127,9 +135,8 @@ jobs:
             --platform linux/amd64 \
             --label "org.opencontainers.image.source=${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}" \
             --label "org.opencontainers.image.revision=${GITHUB_SHA}" \
-            --label "org.opencontainers.image.version=${IMAGE_VERSION}" \
+            --label "org.opencontainers.image.version=${RELEASE_LABEL}" \
             --tag "${IMAGE_PREFIX}-admin:${IMAGE_VERSION}" \
-            --tag "${IMAGE_PREFIX}-admin:sha-${GITHUB_SHA:0:12}" \
             --file admin/Dockerfile admin
 
   deploy:
@@ -266,17 +273,61 @@ jobs:
           DEPLOY_PORT: ${{ vars.MONITOR_DEPLOY_PORT }}
           GHCR_PULL_USERNAME: ${{ secrets.GHCR_PULL_USERNAME }}
           GHCR_PULL_TOKEN: ${{ secrets.GHCR_PULL_TOKEN }}
+          DOCKER_CONFIG_PATH: /tmp/monitor-release-docker-${{ github.run_id }}-${{ github.run_attempt }}
         run: |
           set -euo pipefail
           port="${DEPLOY_PORT:-22}"
           target="${DEPLOY_USER}@${DEPLOY_HOST}"
+          cleanup_remote_auth() {
+            ssh -i "$HOME/.ssh/monitor_release_key" -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes -o BatchMode=yes -o ConnectTimeout=20 -p "$port" "$target" \
+              "rm -rf -- '$DOCKER_CONFIG_PATH'" >/dev/null 2>&1 || true
+          }
+          trap cleanup_remote_auth EXIT
           printf '%s' "$GHCR_PULL_TOKEN" | ssh -i "$HOME/.ssh/monitor_release_key" -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes -o BatchMode=yes -o ConnectTimeout=20 -p "$port" "$target" \
-            docker login ghcr.io --username "$GHCR_PULL_USERNAME" --password-stdin
-          ssh -i "$HOME/.ssh/monitor_release_key" -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes -o BatchMode=yes -o ConnectTimeout=20 -p "$port" "$target" bash -s -- "$DEPLOY_PATH" <<'REMOTE'
+            "bash -c 'set -euo pipefail; umask 077; export DOCKER_CONFIG=\"\$1\"; mkdir -m 700 -p \"\$DOCKER_CONFIG\"; trap '\''status=\$?; if (( status != 0 )); then rm -rf -- \"\$DOCKER_CONFIG\"; fi'\'' EXIT; docker login ghcr.io --username \"\$2\" --password-stdin' _ '$DOCKER_CONFIG_PATH' '$GHCR_PULL_USERNAME'"
+          ssh -i "$HOME/.ssh/monitor_release_key" -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes -o BatchMode=yes -o ConnectTimeout=20 -p "$port" "$target" bash -s -- "$DEPLOY_PATH" "$DOCKER_CONFIG_PATH" <<'REMOTE'
           set -euo pipefail
           deploy_path="$1"
+          docker_config="$2"
+          export DOCKER_CONFIG="$docker_config"
           cd "$deploy_path"
-          trap 'docker logout ghcr.io >/dev/null 2>&1 || true' EXIT
+          rollback_override=.monitor-release.rollback.compose.yml
+          deployment_started=false
+          old_server="$(docker compose -p monitor-platform -f docker-compose.deploy.yml ps -q server | xargs -r docker inspect --format '{{.Config.Image}}' 2>/dev/null || true)"
+          old_admin="$(docker compose -p monitor-platform -f docker-compose.deploy.yml ps -q admin | xargs -r docker inspect --format '{{.Config.Image}}' 2>/dev/null || true)"
+          rollback_application() {
+            status=$?
+            trap - EXIT
+            if (( status != 0 )) && [[ "$deployment_started" == true ]]; then
+              if [[ "$old_server" =~ ^[A-Za-z0-9][A-Za-z0-9._/:@-]*$ && "$old_admin" =~ ^[A-Za-z0-9][A-Za-z0-9._/:@-]*$ ]]; then
+                printf 'services:\n  server:\n    image: "%s"\n  admin:\n    image: "%s"\n' "$old_server" "$old_admin" > "$rollback_override"
+                if docker compose -p monitor-platform -f docker-compose.deploy.yml -f .monitor-release.compose.yml -f "$rollback_override" up -d --no-build --no-deps server admin; then
+                  rollback_health_passed=false
+                  for attempt in $(seq 1 60); do
+                    if docker compose -p monitor-platform -f docker-compose.deploy.yml exec -T admin wget -qO- http://server:8081/actuator/health | grep -q '"status":"UP"'; then
+                      rollback_health_passed=true
+                      break
+                    fi
+                    sleep 5
+                  done
+                  if [[ "$rollback_health_passed" == true ]]; then
+                    echo 'Previous server/admin images were restored and Server health passed.' >&2
+                  else
+                    docker compose -p monitor-platform -f docker-compose.deploy.yml logs --tail=120 server admin >&2 || true
+                    echo 'Previous images were restored, but Server health did not recover within 5 minutes.' >&2
+                  fi
+                else
+                  echo 'Application image rollback command failed.' >&2
+                fi
+              else
+                echo 'No valid previous server/admin image pair was available; automatic rollback was skipped.' >&2
+              fi
+            fi
+            rm -f "$rollback_override"
+            rm -rf -- "$docker_config"
+            exit "$status"
+          }
+          trap rollback_application EXIT
           tar -xzf .monitor-release-bundle.tar.gz -C "$deploy_path"
           rm -f .monitor-release-bundle.tar.gz
           base=(docker compose -p monitor-platform -f docker-compose.deploy.yml)
@@ -284,12 +335,43 @@ jobs:
           "${base[@]}" exec -T mysql sh -c 'MYSQL_PWD="$MYSQL_ROOT_PASSWORD" mysqladmin --protocol=tcp --user=root ping --silent'
           "${base[@]}" exec -T clickhouse sh -c 'clickhouse-client --user="$CLICKHOUSE_USER" --password="$CLICKHOUSE_PASSWORD" --query "SELECT 1"' >/dev/null
           "${base[@]}" -f .monitor-release.compose.yml pull server admin
+          "${base[@]}" exec -T mysql sh -c 'MYSQL_PWD="$MYSQL_ROOT_PASSWORD" mysql --protocol=tcp --user=root monitor_platform -e "CREATE TABLE IF NOT EXISTS monitor_schema_migration (version VARCHAR(64) NOT NULL, description VARCHAR(255) NOT NULL, installed_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP, PRIMARY KEY (version)) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4"'
           for migration in sql/migrations/V*.sql; do
+            filename="${migration##*/}"
+            if [[ ! "$filename" =~ ^V([0-9]{8}_[0-9]{2})__.*\.sql$ ]]; then
+              echo "Unrecognized MySQL migration filename: $filename" >&2
+              exit 1
+            fi
+            version="${BASH_REMATCH[1]}"
+            applied="$("${base[@]}" exec -T mysql sh -c "MYSQL_PWD=\"\$MYSQL_ROOT_PASSWORD\" mysql --batch --skip-column-names --protocol=tcp --user=root monitor_platform -e \"SELECT COUNT(*) FROM monitor_schema_migration WHERE version = '$version'\"")"
+            if [[ "$applied" == 1 ]]; then
+              echo "Skipping applied MySQL migration $version."
+              continue
+            fi
             "${base[@]}" exec -T mysql sh -c 'MYSQL_PWD="$MYSQL_ROOT_PASSWORD" mysql --protocol=tcp --user=root monitor_platform' < "$migration"
+            applied="$("${base[@]}" exec -T mysql sh -c "MYSQL_PWD=\"\$MYSQL_ROOT_PASSWORD\" mysql --batch --skip-column-names --protocol=tcp --user=root monitor_platform -e \"SELECT COUNT(*) FROM monitor_schema_migration WHERE version = '$version'\"")"
+            if [[ "$applied" != 1 ]]; then
+              echo "MySQL migration $version completed without recording its version." >&2
+              exit 1
+            fi
           done
+          "${base[@]}" exec -T clickhouse sh -c 'clickhouse-client --user="$CLICKHOUSE_USER" --password="$CLICKHOUSE_PASSWORD" --query "CREATE TABLE IF NOT EXISTS monitor.schema_migration (version String, applied_at DateTime DEFAULT now()) ENGINE = ReplacingMergeTree(applied_at) ORDER BY version"'
           for migration in infra/clickhouse/migrations/*.sql; do
+            filename="${migration##*/}"
+            if [[ ! "$filename" =~ ^V([0-9]{8}_[0-9]{2})__.*\.sql$ ]]; then
+              echo "Unrecognized ClickHouse migration filename: $filename" >&2
+              exit 1
+            fi
+            version="${BASH_REMATCH[1]}"
+            applied="$("${base[@]}" exec -T clickhouse sh -c "clickhouse-client --user=\"\$CLICKHOUSE_USER\" --password=\"\$CLICKHOUSE_PASSWORD\" --format=TabSeparatedRaw --query \"SELECT count() FROM monitor.schema_migration FINAL WHERE version = '$version'\"")"
+            if [[ "$applied" == 1 ]]; then
+              echo "Skipping applied ClickHouse migration $version."
+              continue
+            fi
             "${base[@]}" exec -T clickhouse sh -c 'clickhouse-client --user="$CLICKHOUSE_USER" --password="$CLICKHOUSE_PASSWORD" --multiquery' < "$migration"
+            "${base[@]}" exec -T clickhouse sh -c "clickhouse-client --user=\"\$CLICKHOUSE_USER\" --password=\"\$CLICKHOUSE_PASSWORD\" --query \"INSERT INTO monitor.schema_migration (version) VALUES ('$version')\""
           done
+          deployment_started=true
           "${base[@]}" -f .monitor-release.compose.yml up -d --no-build --no-deps server admin
           for attempt in $(seq 1 60); do
             if "${base[@]}" exec -T admin wget -qO- http://server:8081/actuator/health | grep -q '"status":"UP"'; then

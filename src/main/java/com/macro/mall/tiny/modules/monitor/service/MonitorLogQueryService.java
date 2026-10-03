@@ -2,10 +2,13 @@ package com.macro.mall.tiny.modules.monitor.service;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.macro.mall.tiny.modules.monitor.dto.MonitorLogSearchResult;
+import com.macro.mall.tiny.modules.monitor.dto.MonitorExploreAggregationResult;
 import com.macro.mall.tiny.modules.monitor.model.MonitorProject;
 import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.beans.factory.annotation.Value;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.http.HttpStatus;
+import org.springframework.web.client.HttpClientErrorException;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.stereotype.Service;
 import org.springframework.util.StringUtils;
@@ -28,11 +31,17 @@ public class MonitorLogQueryService {
     private final JdbcTemplate clickHouse;
     private final RestClient loki;
 
+    @Autowired
     public MonitorLogQueryService(
             @Qualifier("clickHouseJdbcTemplate") JdbcTemplate clickHouse,
             @Value("${monitor.loki.url:http://loki:3100}") String lokiUrl) {
         this.clickHouse = clickHouse;
         this.loki = RestClient.builder().baseUrl(lokiUrl).build();
+    }
+
+    MonitorLogQueryService(JdbcTemplate clickHouse, RestClient loki) {
+        this.clickHouse = clickHouse;
+        this.loki = loki;
     }
 
     public MonitorLogSearchResult search(MonitorProject project, String traceId, int hours, int limit) {
@@ -41,6 +50,23 @@ public class MonitorLogQueryService {
 
     public MonitorLogSearchResult search(
             MonitorProject project, String traceId, int hours, int limit, String containsText) {
+        return search(project, traceId, hours, limit, containsText, null);
+    }
+
+    public MonitorLogSearchResult search(
+            MonitorProject project, String traceId, int hours, int limit, String containsText, String severity) {
+        return search(project, traceId, hours, limit, containsText, severity, null, null);
+    }
+
+    public MonitorLogSearchResult search(
+            MonitorProject project, String traceId, int hours, int limit, String containsText, String severity,
+            String environment, String release) {
+        return search(project, traceId, hours, limit, containsText, severity, environment, release, null, Map.of());
+    }
+
+    public MonitorLogSearchResult search(
+            MonitorProject project, String traceId, int hours, int limit, String containsText, String severity,
+            String environment, String release, String userId, Map<String, String> tags) {
         String normalizedTraceId = traceId;
         if (StringUtils.hasText(traceId)) {
             if (!traceId.matches("(?i)[0-9a-f]{32}") || traceId.matches("0{32}")) {
@@ -59,8 +85,22 @@ public class MonitorLogQueryService {
         if (normalizedTraceId != null) {
             query += " | monitor_trace_id=" + logqlQuote(normalizedTraceId);
         }
+        if (StringUtils.hasText(environment)) {
+            query += " | monitor_environment=" + logqlQuote(environment);
+        }
+        if (StringUtils.hasText(release)) {
+            query += " | monitor_release=" + logqlQuote(release);
+        }
+        query = appendUserAndTagFilters(query, userId, tags);
         if (StringUtils.hasText(containsText)) {
             query += " |= " + logqlQuote(containsText);
+        }
+        if (StringUtils.hasText(severity)) {
+            String normalizedSeverity = severity.trim().toUpperCase(java.util.Locale.ROOT);
+            if (!List.of("TRACE", "DEBUG", "INFO", "WARN", "ERROR", "FATAL").contains(normalizedSeverity)) {
+                throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "unsupported log severity");
+            }
+            query += " | severity_text=" + logqlQuote(normalizedSeverity);
         }
         String lokiQuery = query;
         try {
@@ -101,6 +141,212 @@ public class MonitorLogQueryService {
         }
     }
 
+    public BigDecimal countForExplore(MonitorProject project, int hours, String traceId, String containsText,
+                                      String severity, String environment, String release) {
+        return countForExplore(project, hours, traceId, containsText, severity, environment, release, null, Map.of());
+    }
+
+    public BigDecimal countForExplore(MonitorProject project, int hours, String traceId, String containsText,
+                                      String severity, String environment, String release, String userId,
+                                      Map<String, String> tags) {
+        int window = Math.max(1, Math.min(168, hours));
+        String query = "sum(count_over_time({service_name=\"observability-platform\"} | monitor_project=" +
+                logqlQuote(project.getProjectKey());
+        if (StringUtils.hasText(traceId)) {
+            query += " | monitor_trace_id=" + logqlQuote(traceId.toLowerCase(java.util.Locale.ROOT));
+        }
+        if (StringUtils.hasText(environment)) {
+            query += " | monitor_environment=" + logqlQuote(environment);
+        }
+        if (StringUtils.hasText(release)) {
+            query += " | monitor_release=" + logqlQuote(release);
+        }
+        query = appendUserAndTagFilters(query, userId, tags);
+        if (StringUtils.hasText(containsText)) {
+            query += " |= " + logqlQuote(containsText);
+        }
+        if (StringUtils.hasText(severity)) {
+            query += " | severity_text=" + logqlQuote(severity.toUpperCase(java.util.Locale.ROOT));
+        }
+        query += " [" + window + "h]))";
+        String lokiQuery = query;
+        try {
+            JsonNode response = loki.get()
+                    .uri(uri -> uri.path("/loki/api/v1/query")
+                            .queryParam("query", "{query}")
+                            .build(Map.of("query", lokiQuery)))
+                    .retrieve()
+                    .body(JsonNode.class);
+            JsonNode value = response == null ? null : response.path("data").path("result").path(0)
+                    .path("value").path(1);
+            if (value == null || value.isMissingNode() || !StringUtils.hasText(value.asText())) {
+                return BigDecimal.ZERO;
+            }
+            return new BigDecimal(value.asText());
+        } catch (RestClientException e) {
+            throw new ResponseStatusException(HttpStatus.BAD_GATEWAY, "log storage query failed", e);
+        }
+    }
+
+    public List<MonitorExploreAggregationResult.Bucket> aggregateForExplore(
+            MonitorProject project, int hours, String traceId, String containsText, String severity,
+            String environment, String release, String groupBy) {
+        return aggregateForExplore(project, hours, traceId, containsText, severity, environment, release,
+                null, Map.of(), groupBy);
+    }
+
+    public List<MonitorExploreAggregationResult.Bucket> aggregateForExplore(
+            MonitorProject project, int hours, String traceId, String containsText, String severity,
+            String environment, String release, String userId, Map<String, String> tags, String groupBy) {
+        return aggregateForExplore(project, hours, traceId, containsText, severity, environment, release,
+                userId, tags, groupBy, false);
+    }
+
+    public List<MonitorExploreAggregationResult.Bucket> aggregateUniqueUsersForExplore(
+            MonitorProject project, int hours, String traceId, String containsText, String severity,
+            String environment, String release, String userId, Map<String, String> tags, String groupBy) {
+        return aggregateForExplore(project, hours, traceId, containsText, severity, environment, release,
+                userId, tags, groupBy, true);
+    }
+
+    public java.util.Set<String> uniqueUserIdsForExplore(
+            MonitorProject project, int hours, String traceId, String containsText, String severity,
+            String environment, String release, String userId, Map<String, String> tags) {
+        int window = Math.max(1, Math.min(168, hours));
+        String query = "count by (monitor_user_id) (count_over_time({service_name=\"observability-platform\"} | monitor_project=" +
+                logqlQuote(project.getProjectKey());
+        query = appendExploreLogFilters(query, traceId, environment, release, userId, tags, containsText, severity);
+        query += " | monitor_user_id!=\"\" [" + window + "h]))";
+        String lokiQuery = query;
+        try {
+            JsonNode response = loki.get()
+                    .uri(uri -> uri.path("/loki/api/v1/query")
+                            .queryParam("query", "{query}")
+                            .build(Map.of("query", lokiQuery)))
+                    .retrieve()
+                    .body(JsonNode.class);
+            if (response == null || !"success".equals(response.path("status").asText())) {
+                throw new ResponseStatusException(HttpStatus.BAD_GATEWAY, "log storage returned an invalid unique-user result");
+            }
+            JsonNode results = response.path("data").path("result");
+            if (!results.isArray() || !"vector".equals(response.path("data").path("resultType").asText())
+                    || (response.path("warnings").isArray() && !response.path("warnings").isEmpty())) {
+                throw new ResponseStatusException(HttpStatus.BAD_GATEWAY, "log storage returned an invalid unique-user result");
+            }
+            java.util.Set<String> userIds = new java.util.HashSet<>();
+            for (JsonNode result : results) {
+                String value = result.path("metric").path("monitor_user_id").asText("");
+                if (StringUtils.hasText(value)) userIds.add(value);
+                if (userIds.size() > MonitorQueryService.EXPLORE_UNIQUE_USER_LIMIT) {
+                    throw new ResponseStatusException(HttpStatus.UNPROCESSABLE_ENTITY,
+                            "mixed Explore unique-user result exceeds the 10,000 signal-user limit; narrow the time range or filters");
+                }
+            }
+            return userIds;
+        } catch (HttpClientErrorException e) {
+            String body = e.getResponseBodyAsString().toLowerCase(java.util.Locale.ROOT);
+            if (body.contains("series") && (body.contains("maximum") || body.contains("limit"))) {
+                throw new ResponseStatusException(HttpStatus.UNPROCESSABLE_ENTITY,
+                        "Loki unique-user query exceeded its series limit; narrow the time range or filters", e);
+            }
+            throw new ResponseStatusException(HttpStatus.BAD_GATEWAY, "log storage query failed", e);
+        } catch (RestClientException e) {
+            throw new ResponseStatusException(HttpStatus.BAD_GATEWAY, "log storage query failed", e);
+        }
+    }
+
+    private List<MonitorExploreAggregationResult.Bucket> aggregateForExplore(
+            MonitorProject project, int hours, String traceId, String containsText, String severity,
+            String environment, String release, String userId, Map<String, String> tags, String groupBy,
+            boolean uniqueUsers) {
+        String dimension = switch (groupBy == null ? "" : groupBy.trim().toLowerCase(java.util.Locale.ROOT)) {
+            case "signal" -> "signal";
+            case "environment" -> "monitor_environment";
+            case "release" -> "monitor_release";
+            case "level" -> "severity_text";
+            default -> throw new ResponseStatusException(HttpStatus.BAD_REQUEST,
+                    "unsupported Logs Explore aggregation dimension");
+        };
+        int window = Math.max(1, Math.min(168, hours));
+        String uniqueUserFilter = uniqueUsers ? " | monitor_user_id!=\"\"" : "";
+        if ("signal".equals(dimension)) {
+            if (uniqueUsers) {
+                String query = "count(count by (monitor_user_id) (count_over_time({service_name=\"observability-platform\"} | monitor_project=" +
+                        logqlQuote(project.getProjectKey());
+                query = appendExploreLogFilters(query, traceId, environment, release, userId, tags, containsText, severity);
+                query += uniqueUserFilter + " [" + window + "h])))";
+                return queryExploreBuckets(query, "", "logs");
+            }
+            BigDecimal count = countForExplore(project, window, traceId, containsText, severity, environment, release,
+                    userId, tags);
+            return count.signum() == 0 ? List.of() : List.of(
+                    new MonitorExploreAggregationResult.Bucket("logs", count.longValue(), null));
+        }
+        String query;
+        if (uniqueUsers) {
+            query = "count by (" + dimension + ") (count by (" + dimension + ", monitor_user_id) " +
+                    "(count_over_time({service_name=\"observability-platform\"} | monitor_project=" +
+                    logqlQuote(project.getProjectKey());
+        } else {
+            query = "sum by (" + dimension + ") (count_over_time({service_name=\"observability-platform\"} | monitor_project=" +
+                    logqlQuote(project.getProjectKey());
+        }
+        query = appendExploreLogFilters(query, traceId, environment, release, userId, tags, containsText, severity);
+        query += uniqueUserFilter + " [" + window + "h]" + (uniqueUsers ? ")))" : "))");
+        return queryExploreBuckets(query, dimension, null);
+    }
+
+    private String appendExploreLogFilters(
+            String query, String traceId, String environment, String release, String userId,
+            Map<String, String> tags, String containsText, String severity) {
+        if (StringUtils.hasText(traceId)) {
+            query += " | monitor_trace_id=" + logqlQuote(traceId.toLowerCase(java.util.Locale.ROOT));
+        }
+        if (StringUtils.hasText(environment)) {
+            query += " | monitor_environment=" + logqlQuote(environment);
+        }
+        if (StringUtils.hasText(release)) {
+            query += " | monitor_release=" + logqlQuote(release);
+        }
+        query = appendUserAndTagFilters(query, userId, tags);
+        if (StringUtils.hasText(containsText)) {
+            query += " |= " + logqlQuote(containsText);
+        }
+        if (StringUtils.hasText(severity)) {
+            query += " | severity_text=" + logqlQuote(severity.toUpperCase(java.util.Locale.ROOT));
+        }
+        return query;
+    }
+
+    private List<MonitorExploreAggregationResult.Bucket> queryExploreBuckets(
+            String query, String dimension, String signalValue) {
+        String lokiQuery = query;
+        try {
+            JsonNode response = loki.get()
+                    .uri(uri -> uri.path("/loki/api/v1/query")
+                            .queryParam("query", "{query}")
+                            .build(Map.of("query", lokiQuery)))
+                    .retrieve()
+                    .body(JsonNode.class);
+            JsonNode results = response == null ? null : response.path("data").path("result");
+            if (results == null || !results.isArray()) return List.of();
+            List<MonitorExploreAggregationResult.Bucket> buckets = new ArrayList<>();
+            for (JsonNode result : results) {
+                String value = signalValue == null ? result.path("metric").path(dimension).asText("") : signalValue;
+                JsonNode count = result.path("value").path(1);
+                if (!count.isMissingNode() && StringUtils.hasText(count.asText())) {
+                    buckets.add(new MonitorExploreAggregationResult.Bucket(
+                            StringUtils.hasText(value) ? value : "(empty)", new BigDecimal(count.asText()).longValue(), null));
+                }
+            }
+            return buckets.stream().sorted(java.util.Comparator
+                    .comparingLong(MonitorExploreAggregationResult.Bucket::count).reversed()
+                    .thenComparing(MonitorExploreAggregationResult.Bucket::value)).limit(100).toList();
+        } catch (RestClientException e) {
+            throw new ResponseStatusException(HttpStatus.BAD_GATEWAY, "log storage query failed", e);
+        }
+    }
+
     private boolean belongsToProject(String projectKey, String traceId) {
         Long found = clickHouse.queryForObject(
                 "SELECT count() FROM (" +
@@ -109,9 +355,11 @@ public class MonitorLogQueryService {
                         "UNION ALL SELECT event_id FROM monitor.behavior_event WHERE project_id=? AND trace_id=? " +
                         "UNION ALL SELECT event_id FROM monitor.replay_event WHERE project_id=? AND trace_id=? " +
                         "UNION ALL SELECT event_id FROM monitor.metric_event WHERE project_id=? AND trace_id=? " +
+                        "UNION ALL SELECT event_id FROM monitor.profile_event WHERE project_id=? AND trace_id=? " +
                         "LIMIT 1)",
                 Long.class,
-                projectKey, traceId, projectKey, traceId, projectKey, traceId, projectKey, traceId, projectKey, traceId
+                projectKey, traceId, projectKey, traceId, projectKey, traceId, projectKey, traceId,
+                projectKey, traceId, projectKey, traceId
         );
         return found != null && found > 0;
     }
@@ -158,6 +406,18 @@ public class MonitorLogQueryService {
                 .replace("\"", "\\\"")
                 .replace("\n", "\\n")
                 .replace("\r", "\\r") + "\"";
+    }
+
+    private String appendUserAndTagFilters(String query, String userId, Map<String, String> tags) {
+        if (StringUtils.hasText(userId)) query += " | monitor_user_id=" + logqlQuote(userId);
+        if (tags != null) {
+            for (Map.Entry<String, String> entry : new java.util.TreeMap<>(tags).entrySet()) {
+                String key = entry.getKey();
+                String value = entry.getValue();
+                query += " | monitor_tags=~" + logqlQuote(MonitorLogTagMetadata.exactTokenRegex(key, value));
+            }
+        }
+        return query;
     }
 
     private String timestamp(String nanos) {

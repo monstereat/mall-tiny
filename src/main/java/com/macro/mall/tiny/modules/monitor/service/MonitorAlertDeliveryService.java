@@ -15,8 +15,9 @@ import com.macro.mall.tiny.modules.monitor.model.MonitorProject;
 import lombok.RequiredArgsConstructor;
 import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.data.redis.core.ZSetOperations;
+import org.springframework.http.HttpStatusCode;
 import org.springframework.http.MediaType;
-import org.springframework.http.client.SimpleClientHttpRequestFactory;
+import org.springframework.http.client.JdkClientHttpRequestFactory;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.dao.DataAccessException;
 import org.springframework.stereotype.Service;
@@ -24,6 +25,7 @@ import org.springframework.util.StringUtils;
 import org.springframework.web.client.RestClient;
 
 import java.time.Duration;
+import java.net.http.HttpClient;
 import java.util.Comparator;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -96,6 +98,12 @@ public class MonitorAlertDeliveryService {
                 .limit(200).toList();
     }
 
+    public boolean hasDelivery(Long alertRecordId) {
+        Long count = deliveryMapper.selectCount(Wrappers.<MonitorAlertDeliveryEntity>lambdaQuery()
+                .eq(MonitorAlertDeliveryEntity::getAlertRecordId, alertRecordId));
+        return count != null && count > 0;
+    }
+
     @Scheduled(fixedDelayString = "${monitor.alert.delivery-recovery-interval-ms:10000}")
     public void recoverPendingRetries() {
         long now = System.currentTimeMillis();
@@ -153,8 +161,11 @@ public class MonitorAlertDeliveryService {
                 save(copy(delivery, "skipped", attempts, 0, null));
                 return;
             }
-            SimpleClientHttpRequestFactory requestFactory = new SimpleClientHttpRequestFactory();
-            requestFactory.setConnectTimeout(CONNECT_TIMEOUT);
+            HttpClient httpClient = HttpClient.newBuilder()
+                    .connectTimeout(CONNECT_TIMEOUT)
+                    .followRedirects(HttpClient.Redirect.NEVER)
+                    .build();
+            JdkClientHttpRequestFactory requestFactory = new JdkClientHttpRequestFactory(httpClient);
             requestFactory.setReadTimeout(READ_TIMEOUT);
             RestClient.builder().requestFactory(requestFactory).build().post()
                     .uri(destination)
@@ -171,6 +182,8 @@ public class MonitorAlertDeliveryService {
                             "message", alert.getMessage()
                     ))
                     .retrieve()
+                    .onStatus(HttpStatusCode::is3xxRedirection,
+                            (request, response) -> { throw new IllegalStateException("webhook redirect rejected"); })
                     .toBodilessEntity();
             save(copy(delivery, "delivered", attempts, 0, null));
         } catch (RuntimeException ignored) {

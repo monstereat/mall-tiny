@@ -21,12 +21,14 @@ public class MonitorSamlLoginCodeService {
     private final StringRedisTemplate redis;
     private final UmsAdminService adminService;
     private final JwtTokenUtil jwtTokenUtil;
+    private final MonitorSamlTokenRevocationService revocationService;
 
     public String issue(String username, String tenantKey, String subject) {
         byte[] bytes = new byte[32];
         RANDOM.nextBytes(bytes);
         String code = Base64.getUrlEncoder().withoutPadding().encodeToString(bytes);
-        String payload = encode(username) + "." + encode(tenantKey) + "." + encode(subject);
+        String payload = encode(username) + "." + encode(tenantKey) + "." + encode(subject)
+                + "." + System.currentTimeMillis();
         redis.opsForValue().set(KEY_PREFIX + code, payload, CODE_TTL);
         return code;
     }
@@ -36,12 +38,21 @@ public class MonitorSamlLoginCodeService {
         String payload = redis.opsForValue().getAndDelete(KEY_PREFIX + code);
         if (payload == null) return null;
         String[] parts = payload.split("\\.", -1);
-        if (parts.length != 3) return null;
+        if (parts.length != 4) return null;
         String username = decode(parts[0]);
         String tenantKey = decode(parts[1]);
         String subject = decode(parts[2]);
-        if (username == null || tenantKey == null || subject == null) return null;
-        return jwtTokenUtil.generateSamlToken(adminService.loadUserByUsername(username), tenantKey, subject);
+        long issuedAt;
+        try {
+            issuedAt = Long.parseLong(parts[3]);
+        } catch (NumberFormatException e) {
+            return null;
+        }
+        if (username == null || tenantKey == null || subject == null
+                || revocationService.isRevoked(new JwtTokenUtil.SamlTokenIdentity(tenantKey, subject, issuedAt))) {
+            return null;
+        }
+        return jwtTokenUtil.generateSamlToken(adminService.loadUserByUsername(username), tenantKey, subject, issuedAt);
     }
 
     private String encode(String value) {

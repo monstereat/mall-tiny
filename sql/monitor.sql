@@ -178,6 +178,12 @@ CREATE TABLE IF NOT EXISTS monitor_project (
   platform VARCHAR(32) NOT NULL DEFAULT 'web',
   owner_id BIGINT DEFAULT NULL,
   status TINYINT NOT NULL DEFAULT 1,
+  scrub_emails TINYINT(1) NOT NULL DEFAULT 0,
+  scrub_credit_cards TINYINT(1) NOT NULL DEFAULT 0,
+  scrub_ip_addresses TINYINT(1) NOT NULL DEFAULT 0,
+  scrub_phone_numbers TINYINT(1) NOT NULL DEFAULT 0,
+  scrub_chinese_id_numbers TINYINT(1) NOT NULL DEFAULT 0,
+  custom_sensitive_fields TEXT DEFAULT NULL,
   create_time DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
   update_time DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
   PRIMARY KEY (id),
@@ -231,6 +237,8 @@ CREATE TABLE IF NOT EXISTS monitor_cron_checkin (
   UNIQUE KEY uk_monitor_cron_checkin (cron_id, checkin_id),
   KEY idx_monitor_cron_checkin_history (cron_id, id),
   KEY idx_monitor_cron_checkin_open (cron_id, status, started_at),
+  KEY idx_monitor_cron_checkin_completed_retention (completed_at, id),
+  KEY idx_monitor_cron_checkin_in_progress_retention (status, started_at, id),
   CONSTRAINT fk_monitor_cron_checkin_monitor FOREIGN KEY (cron_id)
     REFERENCES monitor_cron (id) ON DELETE CASCADE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='定时任务 Check-in 历史';
@@ -249,6 +257,21 @@ CREATE TABLE IF NOT EXISTS monitor_saved_explore_query (
   CONSTRAINT fk_monitor_saved_explore_project FOREIGN KEY (project_id)
     REFERENCES monitor_project (id) ON DELETE CASCADE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='项目共享的 Explore 查询';
+
+CREATE TABLE IF NOT EXISTS monitor_dashboard (
+  id BIGINT NOT NULL AUTO_INCREMENT,
+  project_id BIGINT NOT NULL,
+  name VARCHAR(100) NOT NULL,
+  query_ids JSON NOT NULL,
+  created_by BIGINT NOT NULL,
+  create_time DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
+  update_time DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3) ON UPDATE CURRENT_TIMESTAMP(3),
+  PRIMARY KEY (id),
+  UNIQUE KEY uk_monitor_dashboard_project_name (project_id, name),
+  KEY idx_monitor_dashboard_project (project_id, id),
+  CONSTRAINT fk_monitor_dashboard_project FOREIGN KEY (project_id)
+    REFERENCES monitor_project (id) ON DELETE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='项目共享的监控 Dashboard';
 
 CREATE TABLE IF NOT EXISTS monitor_uptime_check (
   id BIGINT NOT NULL AUTO_INCREMENT,
@@ -404,6 +427,25 @@ CREATE TABLE IF NOT EXISTS monitor_issue (
   KEY idx_project_last_seen (project_id, last_seen)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='异常聚合 Issue';
 
+CREATE TABLE IF NOT EXISTS monitor_issue_activity (
+  id BIGINT NOT NULL AUTO_INCREMENT,
+  project_id BIGINT NOT NULL,
+  issue_id BIGINT NOT NULL,
+  actor_admin_id BIGINT NOT NULL,
+  actor_name VARCHAR(64) NOT NULL,
+  activity_type VARCHAR(16) NOT NULL,
+  comment_text VARCHAR(2000) DEFAULT NULL,
+  previous_status VARCHAR(32) DEFAULT NULL,
+  new_status VARCHAR(32) DEFAULT NULL,
+  create_time DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
+  PRIMARY KEY (id),
+  KEY idx_monitor_issue_activity_timeline (project_id, issue_id, id),
+  CONSTRAINT fk_monitor_issue_activity_project FOREIGN KEY (project_id)
+    REFERENCES monitor_project (id) ON DELETE CASCADE,
+  CONSTRAINT fk_monitor_issue_activity_issue FOREIGN KEY (issue_id)
+    REFERENCES monitor_issue (id) ON DELETE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='Issue 评论与状态变更时间线';
+
 CREATE TABLE IF NOT EXISTS monitor_alert_notification_route (
   id BIGINT NOT NULL AUTO_INCREMENT,
   tenant_id BIGINT NOT NULL,
@@ -476,6 +518,15 @@ CREATE TABLE IF NOT EXISTS monitor_replay (
   KEY idx_project_session (project_id, session_id),
   KEY idx_replay_create_time (create_time)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='Session Replay 对象索引';
+
+CREATE TABLE IF NOT EXISTS monitor_replay_storage_usage (
+  storage_bucket VARCHAR(255) NOT NULL,
+  project_key VARCHAR(64) NOT NULL,
+  used_bytes BIGINT NOT NULL DEFAULT 0,
+  reconciled_at DATETIME(3) DEFAULT NULL,
+  updated_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3) ON UPDATE CURRENT_TIMESTAMP(3),
+  PRIMARY KEY (storage_bucket, project_key)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='Session Replay per-project object storage usage';
 
 CREATE TABLE IF NOT EXISTS monitor_alert_record (
   id BIGINT NOT NULL AUTO_INCREMENT,
@@ -622,6 +673,9 @@ INSERT IGNORE INTO monitor_schema_migration (version, description)
 VALUES ('20261003_01', 'monitor cron monitors and check-ins');
 
 INSERT IGNORE INTO monitor_schema_migration (version, description)
+VALUES ('20261004_01', 'monitor cron check-in history retention index');
+
+INSERT IGNORE INTO monitor_schema_migration (version, description)
 VALUES ('20261003_03', 'monitor metric dimension cardinality governance');
 
 INSERT IGNORE INTO monitor_schema_migration (version, description)
@@ -664,3 +718,24 @@ VALUES ('20261003_10', 'tenant-shared alert notification routes');
 
 INSERT IGNORE INTO monitor_schema_migration (version, description)
 VALUES ('20261003_11', 'tenant custom organizational roles');
+
+INSERT IGNORE INTO monitor_schema_migration (version, description)
+VALUES ('20261003_17', 'add project-level PII scrubbing settings');
+
+INSERT IGNORE INTO monitor_schema_migration (version, description)
+VALUES ('20261003_18', 'add project-level IP address scrubbing setting');
+
+INSERT IGNORE INTO monitor_schema_migration (version, description)
+VALUES ('20261003_19', 'add project-level custom sensitive field names');
+
+INSERT IGNORE INTO monitor_schema_migration (version, description)
+VALUES ('20261003_20', 'add replay per-project storage usage ledger');
+
+INSERT IGNORE INTO monitor_schema_migration (version, description)
+VALUES ('20261003_21', 'project-shared custom monitor dashboards');
+
+INSERT IGNORE INTO monitor_schema_migration (version, description)
+VALUES ('20261003_22', 'add project-level phone and Chinese ID scrubbing settings');
+
+INSERT IGNORE INTO monitor_schema_migration (version, description)
+VALUES ('20261003_23', 'Issue comments and status activity timeline');

@@ -31,7 +31,9 @@ class MonitorAdminServiceIssueBulkTest {
     private final MonitorAlertRuleMapper alertRuleMapper = mock(MonitorAlertRuleMapper.class);
     private final MonitorIssueMapper issueMapper = mock(MonitorIssueMapper.class);
     private final MonitorAlertNotificationRouteService notificationRouteService = mock(MonitorAlertNotificationRouteService.class);
-    private final MonitorAdminService service = new MonitorAdminService(projectAccessService, alertRuleMapper, issueMapper, notificationRouteService);
+    private final MonitorIssueActivityService issueActivityService = mock(MonitorIssueActivityService.class);
+    private final MonitorAdminService service = new MonitorAdminService(
+            projectAccessService, alertRuleMapper, issueMapper, notificationRouteService, issueActivityService);
 
     @Test
     void bulkStatusUpdateIsScopedToProjectAndSelectedIssues() {
@@ -40,6 +42,10 @@ class MonitorAdminServiceIssueBulkTest {
         MonitorIssueBulkStatusRequest request = new MonitorIssueBulkStatusRequest();
         request.setIssueIds(List.of(10L, 11L));
         request.setStatus("resolved");
+        MonitorIssue issue = new MonitorIssue();
+        issue.setId(10L);
+        issue.setStatus("unresolved");
+        when(issueMapper.selectList(any())).thenReturn(List.of(issue));
         when(issueMapper.update(isNull(), any(UpdateWrapper.class))).thenReturn(2);
 
         int updated = service.updateIssuesStatus(project, request);
@@ -49,6 +55,7 @@ class MonitorAdminServiceIssueBulkTest {
         verify(issueMapper).update(isNull(), updateCaptor.capture());
         assertTrue(updateCaptor.getValue().getSqlSet().contains("regressed_at"));
         assertTrue(updateCaptor.getValue().getSqlSet().contains("resolved_at"));
+        verify(issueActivityService).recordStatusChange(project, 10L, "unresolved", "resolved");
     }
 
     @Test
@@ -75,6 +82,7 @@ class MonitorAdminServiceIssueBulkTest {
         MonitorIssue issue = new MonitorIssue();
         issue.setId(10L);
         issue.setProjectId(42L);
+        issue.setStatus("unresolved");
         issue.setRegressedAt(new java.util.Date(1_000));
         when(issueMapper.selectById(10L)).thenReturn(issue);
         when(issueMapper.update(isNull(), any(UpdateWrapper.class))).thenReturn(1);
@@ -87,6 +95,7 @@ class MonitorAdminServiceIssueBulkTest {
         verify(issueMapper).update(isNull(), updateCaptor.capture());
         assertTrue(updateCaptor.getValue().getSqlSet().contains("resolved_at"));
         assertTrue(updateCaptor.getValue().getSqlSet().contains("regressed_at"));
+        verify(issueActivityService).recordStatusChange(project, 10L, "unresolved", "resolved");
     }
 
     @Test

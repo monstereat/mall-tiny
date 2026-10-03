@@ -19,6 +19,8 @@ import org.springframework.web.server.ResponseStatusException;
 
 import java.time.ZoneId;
 import java.time.ZonedDateTime;
+import java.time.Instant;
+import java.time.temporal.ChronoUnit;
 import java.util.Date;
 import java.util.List;
 import java.util.UUID;
@@ -31,6 +33,9 @@ public class MonitorCronService {
 
     private static final Pattern INTERVAL = Pattern.compile("([1-9][0-9]*)(s|m|h|d|w)");
     private static final long MAX_INTERVAL_SECONDS = 28L * 24 * 60 * 60;
+    private static final int CHECK_IN_RETENTION_DAYS = 90;
+    private static final int CLEANUP_BATCH_SIZE = 1000;
+    private static final int MAX_CLEANUP_BATCHES = 10;
 
     private final MonitorCronMapper cronMapper;
     private final MonitorCronCheckInMapper checkInMapper;
@@ -257,6 +262,19 @@ public class MonitorCronService {
             cron.setHealthStatus(cron.getConsecutiveFailures() >= cron.getFailureThreshold() ? "error" : "warning");
             cron.setNextCheckinAt(nextCheckIn(cron, now));
             cronMapper.updateById(cron);
+        }
+    }
+
+    @Scheduled(fixedDelayString = "${monitor.cron.checkin-cleanup-interval-ms:3600000}")
+    public void pruneExpiredCheckIns() {
+        Date cutoff = Date.from(Instant.now().minus(CHECK_IN_RETENTION_DAYS, ChronoUnit.DAYS));
+        for (int batch = 0; batch < MAX_CLEANUP_BATCHES; batch++) {
+            int deleted = checkInMapper.deleteCompletedBefore(cutoff, CLEANUP_BATCH_SIZE);
+            if (deleted < CLEANUP_BATCH_SIZE) break;
+        }
+        for (int batch = 0; batch < MAX_CLEANUP_BATCHES; batch++) {
+            int deleted = checkInMapper.deleteStaleInProgressBefore(cutoff, CLEANUP_BATCH_SIZE);
+            if (deleted < CLEANUP_BATCH_SIZE) return;
         }
     }
 

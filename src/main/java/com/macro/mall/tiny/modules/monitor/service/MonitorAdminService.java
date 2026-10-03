@@ -14,6 +14,8 @@ import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 import org.springframework.web.server.ResponseStatusException;
 
+import java.util.List;
+
 @Service
 @RequiredArgsConstructor
 public class MonitorAdminService {
@@ -22,6 +24,7 @@ public class MonitorAdminService {
     private final MonitorAlertRuleMapper alertRuleMapper;
     private final MonitorIssueMapper issueMapper;
     private final MonitorAlertNotificationRouteService notificationRouteService;
+    private final MonitorIssueActivityService issueActivityService;
 
     public MonitorProject requireProject(String projectKey) {
         return projectAccessService.requireProject(projectKey, false);
@@ -64,6 +67,7 @@ public class MonitorAdminService {
         if (issue == null || !project.getId().equals(issue.getProjectId())) {
             throw new ResponseStatusException(HttpStatus.NOT_FOUND, "issue not found");
         }
+        String previousStatus = issue.getStatus();
         issue.setStatus(status);
         issue.setRegressedAt(null);
         issue.setResolvedAt("resolved".equals(status) ? new java.util.Date() : null);
@@ -73,6 +77,7 @@ public class MonitorAdminService {
                 .set("status", status)
                 .set("regressed_at", null)
                 .set("resolved_at", issue.getResolvedAt()));
+        issueActivityService.recordStatusChange(project, issueId, previousStatus, status);
         return issue;
     }
 
@@ -82,12 +87,19 @@ public class MonitorAdminService {
         if (!java.util.Set.of("unresolved", "resolved", "ignored").contains(status)) {
             throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "invalid issue status");
         }
-        return issueMapper.update(null, Wrappers.<MonitorIssue>update()
+        List<MonitorIssue> issues = issueMapper.selectList(Wrappers.<MonitorIssue>query()
+                .eq("project_id", project.getId())
+                .in("id", request.getIssueIds()));
+        int updated = issueMapper.update(null, Wrappers.<MonitorIssue>update()
                 .eq("project_id", project.getId())
                 .in("id", request.getIssueIds())
                 .set("status", status)
                 .set("regressed_at", null)
                 .set("resolved_at", "resolved".equals(status) ? new java.util.Date() : null));
+        for (MonitorIssue issue : issues) {
+            issueActivityService.recordStatusChange(project, issue.getId(), issue.getStatus(), status);
+        }
+        return updated;
     }
 
     private MonitorAlertRule copy(MonitorAlertRule rule, MonitorProject project, AlertRuleRequest request) {

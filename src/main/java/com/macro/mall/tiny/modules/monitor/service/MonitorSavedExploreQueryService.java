@@ -103,6 +103,11 @@ public class MonitorSavedExploreQueryService {
             throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "unsupported Explore aggregation dimension");
         }
         request.setGroupBy(groupBy);
+        if ("logs".equalsIgnoreCase(request.getType())
+                && !Set.of("signal", "environment", "release", "level").contains(groupBy.toLowerCase())) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST,
+                    "Logs saved queries support signal, environment, release or level aggregation");
+        }
         String aggregation = request.getAggregation() == null ? "count" : request.getAggregation().trim().toLowerCase();
         if (!Set.of("count", "count_unique", "sum", "avg", "min", "max", "p50", "p75", "p95")
                 .contains(aggregation)) {
@@ -125,6 +130,12 @@ public class MonitorSavedExploreQueryService {
         }
         request.setAggregation(aggregation);
         request.setField(field);
+        if ("logs".equalsIgnoreCase(request.getType())
+                && (!"count".equals(aggregation) || !"value".equalsIgnoreCase(field)
+                || request.getHours() > 168)) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST,
+                    "Logs saved queries support count aggregation for up to 7 days");
+        }
         boolean hasFormula = StringUtils.hasText(request.getFormula());
         boolean hasFormulaMetrics = request.getFormulaMetrics() != null && !request.getFormulaMetrics().isEmpty();
         if (hasFormula != hasFormulaMetrics) {
@@ -145,11 +156,10 @@ public class MonitorSavedExploreQueryService {
             request.setFormulaMetrics(metricNames);
         }
         if ("logs".equalsIgnoreCase(request.getType())
-                && (StringUtils.hasText(request.getEnvironment()) || StringUtils.hasText(request.getRelease())
-                || StringUtils.hasText(request.getUserId()) || hasTagKey || parsed.expression() != null || parsed.terms().stream()
-                .anyMatch(term -> !"trace".equals(term.field()) || term.negated()))) {
+                && (StringUtils.hasText(request.getUserId()) || hasTagKey || parsed.expression() != null || parsed.terms().stream()
+                .anyMatch(term -> term.negated() || !Set.of("trace", "environment", "release", "level").contains(term.field())))) {
             throw new ResponseStatusException(HttpStatus.BAD_REQUEST,
-                    "Logs saved queries support trace and text filters only");
+                    "Logs saved queries support environment, release, trace, severity and text filters only");
         }
     }
 

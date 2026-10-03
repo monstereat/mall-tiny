@@ -74,13 +74,11 @@ class MonitorScimServiceTest {
         MonitorScimUser identity = user("user-1", 7L, 41L, "external-1", 1);
         UmsAdmin admin = admin(41L, "alice", 1);
         when(scimUserMapper.selectOne(any())).thenReturn(identity);
-        when(adminMapper.selectById(41L)).thenReturn(admin);
-        when(adminService.getCacheService()).thenReturn(adminCacheService);
 
         service().deleteUser(context, "user-1");
 
         assertEquals(0, identity.getActive());
-        assertEquals(0, admin.getStatus());
+        assertEquals(1, admin.getStatus());
         ArgumentCaptor<LambdaQueryWrapper<MonitorTenantMember>> tenantMembers = ArgumentCaptor.forClass(LambdaQueryWrapper.class);
         verify(tenantMemberMapper, org.mockito.Mockito.atLeastOnce()).delete(tenantMembers.capture());
         assertTrue(tenantMembers.getAllValues().stream().allMatch(query ->
@@ -93,6 +91,25 @@ class MonitorScimServiceTest {
         assertTrue(teamMembers.getValue().getSqlSegment().contains("admin_id"));
         assertTrue(teamMembers.getValue().getSqlSegment().contains("MPGENVAL"));
         verify(scimUserMapper).deleteById("user-1");
+    }
+
+    @Test
+    void deactivatingUserRemovesOnlyTenantMembershipAndKeepsGlobalAdminEnabled() throws Exception {
+        MonitorScimUser identity = user("user-1", 7L, 41L, null, 1);
+        UmsAdmin admin = admin(41L, "alice", 1);
+        stubExistingUser(identity, admin);
+        JsonNode input = json("""
+                {"Operations":[{"op":"replace","path":"active","value":false}]}
+                """);
+
+        service().patchUser(context(7L), "user-1", input);
+
+        assertEquals(0, identity.getActive());
+        assertEquals(1, admin.getStatus());
+        ArgumentCaptor<LambdaQueryWrapper<MonitorTenantMember>> tenantMembers = ArgumentCaptor.forClass(LambdaQueryWrapper.class);
+        verify(tenantMemberMapper).delete(tenantMembers.capture());
+        assertTrue(tenantMembers.getValue().getSqlSegment().contains("tenant_id"));
+        assertTrue(tenantMembers.getValue().getSqlSegment().contains("admin_id"));
     }
 
     @Test
@@ -211,7 +228,7 @@ class MonitorScimServiceTest {
         ArgumentCaptor<MonitorScimUser> inserted = ArgumentCaptor.forClass(MonitorScimUser.class);
         verify(scimUserMapper).insert(inserted.capture());
         assertEquals(41L, inserted.getValue().getAdminId());
-        assertEquals(1, disabledAdmin.getStatus());
+        assertEquals(0, disabledAdmin.getStatus());
         verify(adminMapper, never()).insert(any(UmsAdmin.class));
         verify(adminRoleMapper, never()).insert(any(UmsAdminRoleRelation.class));
         verify(adminRoleMapper).selectCount(any());

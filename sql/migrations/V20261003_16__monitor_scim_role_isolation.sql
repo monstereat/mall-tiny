@@ -39,7 +39,12 @@ FROM ums_admin_role_relation old_assignment
 JOIN ums_role old_role ON old_role.id = old_assignment.role_id
 JOIN monitor_scim_user scim_user ON scim_user.admin_id = old_assignment.admin_id
 WHERE old_role.name = 'Observability SCIM Member'
-  AND old_role.description <> 'monitor-scim-system-role:v1; tenant/project scoped';
+  AND old_role.description <> 'monitor-scim-system-role:v1; tenant/project scoped'
+  AND NOT EXISTS (
+    SELECT 1
+    FROM monitor_schema_migration migration
+    WHERE migration.version = '20261003_16'
+  );
 
 INSERT IGNORE INTO monitor_schema_migration (version, description)
 VALUES ('20261003_16', 'isolate the managed SCIM member role from similarly named custom roles');

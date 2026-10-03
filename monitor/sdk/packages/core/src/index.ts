@@ -1,4 +1,4 @@
-export type MonitorEventType = 'ERROR' | 'PERFORMANCE' | 'BEHAVIOR' | 'REPLAY' | 'METRIC' | 'PROFILE';
+export type MonitorEventType = 'ERROR' | 'PERFORMANCE' | 'BEHAVIOR' | 'REPLAY' | 'METRIC' | 'PROFILE' | 'SPAN';
 
 export interface MonitorClientOptions {
   endpoint: string;

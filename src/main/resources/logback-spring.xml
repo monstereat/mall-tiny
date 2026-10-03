@@ -7,7 +7,7 @@
     </appender>
 
     <appender name="OpenTelemetry" class="io.opentelemetry.instrumentation.logback.appender.v1_0.OpenTelemetryAppender">
-        <captureMdcAttributes>traceId,monitor.project,monitor.trace_id</captureMdcAttributes>
+        <captureMdcAttributes>traceId,monitor.project,monitor.trace_id,monitor.environment,monitor.release,monitor.user_id,monitor.tags</captureMdcAttributes>
         <numLogsCapturedBeforeOtelInstall>100</numLogsCapturedBeforeOtelInstall>
     </appender>
 

@@ -2,7 +2,7 @@
 import { computed, ref, watch } from 'vue';
 import { useRoute } from 'vue-router';
 import { ElMessage } from 'element-plus';
-import { monitorApi, type IssueAiAnalysis, type IssueDetail, type SourceMapStackFrame } from '../api/monitor';
+import { monitorApi, type IssueActivity, type IssueAiAnalysis, type IssueDetail, type SourceMapStackFrame } from '../api/monitor';
 import { useProjectStore } from '../stores/project';
 
 type Breadcrumb = {
@@ -13,12 +13,19 @@ type Breadcrumb = {
 
 const route = useRoute();
 const projects = useProjectStore();
+const canWrite = computed(() => Boolean(projects.projects.find(item => item.projectKey === projects.currentKey)?.canWrite));
 const detail = ref<IssueDetail | null>(null);
 const sourceFrames = ref<SourceMapStackFrame[]>([]);
 const loading = ref(false);
 const resolvingSource = ref(false);
 const analyzingIssue = ref(false);
 const aiAnalysis = ref<IssueAiAnalysis | null>(null);
+const activities = ref<IssueActivity[]>([]);
+const activityHasMore = ref(false);
+const nextActivityBeforeId = ref<number>();
+const activityLoading = ref(false);
+const activityWriting = ref(false);
+const comment = ref('');
 
 function payload(raw: string): Record<string, any> {
   try { return JSON.parse(raw); } catch { return {}; }
@@ -52,14 +59,58 @@ async function load() {
   loading.value = true;
   sourceFrames.value = [];
   aiAnalysis.value = null;
+  activities.value = [];
+  activityHasMore.value = false;
+  nextActivityBeforeId.value = undefined;
+  comment.value = '';
   try {
     detail.value = await monitorApi.issue(projects.currentKey, String(route.params.id));
-    await resolveSource(false);
+    await Promise.all([resolveSource(false), loadActivities(true)]);
   } catch (e) {
     ElMessage.error(e instanceof Error ? e.message : '加载失败');
   } finally {
     loading.value = false;
   }
+}
+
+async function loadActivities(reset = false) {
+  if (!projects.currentKey || !route.params.id) return;
+  activityLoading.value = true;
+  try {
+    const page = await monitorApi.issueActivities(
+      projects.currentKey,
+      String(route.params.id),
+      reset ? undefined : nextActivityBeforeId.value,
+      50
+    );
+    activities.value = reset ? page.records : [...activities.value, ...page.records];
+    activityHasMore.value = page.hasMore;
+    nextActivityBeforeId.value = page.nextBeforeId;
+  } catch (e) {
+    ElMessage.error(e instanceof Error ? e.message : '加载 Issue 活动失败');
+  } finally {
+    activityLoading.value = false;
+  }
+}
+
+async function addComment() {
+  const text = comment.value.trim();
+  if (!canWrite.value || !projects.currentKey || !detail.value?.issue || !text || activityWriting.value) return;
+  activityWriting.value = true;
+  try {
+    await monitorApi.addIssueComment(projects.currentKey, detail.value.issue.id, text);
+    comment.value = '';
+    await loadActivities(true);
+    ElMessage.success('评论已添加');
+  } catch (e) {
+    ElMessage.error(e instanceof Error ? e.message : '评论添加失败');
+  } finally {
+    activityWriting.value = false;
+  }
+}
+
+function statusLabel(status?: string) {
+  return ({ unresolved: '未解决', resolved: '已解决', ignored: '已忽略' } as Record<string, string>)[status || ''] || status || '-';
 }
 
 async function analyzeIssue() {
@@ -76,9 +127,10 @@ async function analyzeIssue() {
 }
 
 async function updateStatus(status: 'unresolved' | 'resolved' | 'ignored') {
-  if (!projects.currentKey || !detail.value?.issue) return;
+  if (!canWrite.value || !projects.currentKey || !detail.value?.issue) return;
   try {
     detail.value.issue = await monitorApi.updateIssueStatus(projects.currentKey, detail.value.issue.id, status);
+    await loadActivities(true);
     ElMessage.success('Issue 状态已更新');
   } catch (e) {
     ElMessage.error(e instanceof Error ? e.message : '状态更新失败');
@@ -127,7 +179,7 @@ watch([() => projects.currentKey, () => route.params.id], load, { immediate: tru
     <div v-if="detail?.issue" class="panel" style="margin-top:18px">
       <div class="toolbar">
         <h2 style="margin:0">{{ detail.issue.title }}</h2>
-        <div>
+        <div v-if="canWrite">
           <el-button @click="updateStatus('unresolved')">重新打开</el-button>
           <el-button type="success" @click="updateStatus('resolved')">已解决</el-button>
           <el-button type="warning" @click="updateStatus('ignored')">忽略</el-button>
@@ -198,11 +250,43 @@ watch([() => projects.currentKey, () => route.params.id], load, { immediate: tru
         <strong>依据</strong>
         <ul><li v-for="(item,index) in aiAnalysis.evidence" :key="`evidence-${index}`">{{ item }}</li></ul>
       </div>
+      <el-alert
+        v-if="aiAnalysis.limitations.length"
+        title="部分证据源不可用或不完整；缺失内容表示未知，不代表没有相关证据。"
+        type="warning"
+        :closable="false"
+        style="margin-top:12px"
+      >
+        <ul class="ai-limitations"><li v-for="(item,index) in aiAnalysis.limitations" :key="`limitation-${index}`">{{ item }}</li></ul>
+      </el-alert>
+    </div>
+
+    <div v-if="detail?.issue" class="panel">
+      <div class="toolbar">
+        <h3 style="margin:0">Issue 活动</h3>
+        <el-button v-if="activityHasMore" :loading="activityLoading" @click="loadActivities(false)">加载更早活动</el-button>
+      </div>
+      <div v-if="canWrite" style="display:flex;gap:10px;align-items:flex-start;margin:12px 0">
+        <el-input v-model="comment" type="textarea" :rows="2" maxlength="2000" show-word-limit placeholder="写一条 Issue 处理备注" />
+        <el-button type="primary" :loading="activityWriting" :disabled="!comment.trim()" @click="addComment">评论</el-button>
+      </div>
+      <el-empty v-if="!activityLoading && !activities.length" description="暂无评论或状态变更" />
+      <el-timeline v-else>
+        <el-timeline-item v-for="item in activities" :key="item.id" :timestamp="new Date(item.createTime).toLocaleString()">
+          <template v-if="item.activityType === 'comment'">
+            <strong>{{ item.actorName }}</strong><span> 留下评论</span>
+            <p style="white-space:pre-wrap;margin:8px 0 0">{{ item.commentText }}</p>
+          </template>
+          <template v-else>
+            <strong>{{ item.actorName }}</strong><span> 将状态从 {{ statusLabel(item.previousStatus) }} 更新为 {{ statusLabel(item.newStatus) }}</span>
+          </template>
+        </el-timeline-item>
+      </el-timeline>
     </div>
 
     <el-alert
       v-if="detail?.issue"
-      title="点击 AI 分析后，裁剪并脱敏的错误消息/堆栈、Release/环境、事件时间、Issue 统计、Breadcrumb 类型、Trace ID 关联的同项目遥测与日志、SourceMap 源码片段，以及 Replay 片段数和时间范围会发送到管理员配置的 AI 服务。系统会过滤常见邮箱、Bearer/API Key 等内容；不会发送 userId、sessionId、页面 URL 或 Replay 原始内容。数据留存规则取决于所选服务；OpenAI 的 store=false 关闭 Responses 应用状态存储，但默认滥用监控日志仍可能保留请求内容最长 30 天，具体以组织数据控制设置为准。"
+      title="点击 AI 分析后，裁剪并脱敏的错误消息/堆栈、Release/环境、事件时间、Issue 统计、Breadcrumb 类型、Trace ID 关联的同项目遥测与日志、SourceMap 源码片段，以及 Replay 片段数和时间范围会发送到管理员配置的 AI 服务。系统会过滤常见邮箱、Bearer/API Key 等内容；不会发送 userId、sessionId、页面 URL 或 Replay 原始内容。证据源会标记为可用、部分可用、无匹配或不可用；查询失败或跳过会作为分析限制展示，缺失内容不代表没有相关证据。数据留存规则取决于所选服务；OpenAI 的 store=false 关闭 Responses 应用状态存储，但默认滥用监控日志仍可能保留请求内容最长 30 天，具体以组织数据控制设置为准。"
       type="info"
       :closable="false"
       style="margin-top:12px"

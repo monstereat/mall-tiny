@@ -21,7 +21,26 @@ cleanup() {
 }
 trap cleanup EXIT
 
+await_clickhouse() {
+  local phase="$1"
+  local max_attempts=60
+
+  for attempt in $(seq 1 "$max_attempts"); do
+    if docker compose -p "$project" -f "$compose_file" exec -T clickhouse \
+      sh -c 'clickhouse-client --user default --password "$CLICKHOUSE_PASSWORD" --query "SELECT 1"' \
+      >/dev/null 2>&1; then
+      return 0
+    fi
+    sleep 1
+  done
+
+  echo "ClickHouse did not become ready during $phase after ${max_attempts}s; isolated container logs follow:" >&2
+  docker compose -p "$project" -f "$compose_file" logs --no-color --tail=120 clickhouse >&2 || true
+  return 1
+}
+
 docker compose -p "$project" -f "$compose_file" up -d --wait
+await_clickhouse "initial startup"
 
 ch() {
   docker compose -p "$project" -f "$compose_file" exec -T clickhouse \
@@ -57,12 +76,7 @@ result="$(ch --query "SELECT payload FROM monitor.cold_tier_probe FORMAT TabSepa
 [[ "$result" == "s3-cold-roundtrip" ]]
 
 docker compose -p "$project" -f "$compose_file" restart clickhouse >/dev/null
-for attempt in $(seq 1 30); do
-  if ch --query "SELECT 1" >/dev/null 2>&1; then
-    break
-  fi
-  sleep 1
-done
+await_clickhouse "restart"
 result="$(ch --query "SELECT payload FROM monitor.cold_tier_probe FORMAT TabSeparated")"
 [[ "$result" == "s3-cold-roundtrip" ]]
 
@@ -74,13 +88,13 @@ run_deploy_migrations() {
 }
 run_deploy_migrations
 run_deploy_migrations
-default_policy_tables="$(ch --query "SELECT count() FROM system.tables WHERE database = 'monitor' AND name IN ('error_event', 'performance_event', 'metric_event', 'behavior_event', 'profile_event', 'replay_event', 'error_hourly', 'error_hourly_correction') AND storage_policy = 'default' AND create_table_query NOT LIKE '%TO VOLUME%' FORMAT TabSeparated")"
-[[ "$default_policy_tables" == "8" ]]
+default_policy_tables="$(ch --query "SELECT count() FROM system.tables WHERE database = 'monitor' AND name IN ('error_event', 'performance_event', 'metric_event', 'behavior_event', 'profile_event', 'span_event', 'replay_event', 'error_hourly', 'error_hourly_correction') AND storage_policy = 'default' AND create_table_query NOT LIKE '%TO VOLUME%' FORMAT TabSeparated")"
+[[ "$default_policy_tables" == "9" ]]
 
 docker compose -p "$project" -f "$compose_file" exec -T clickhouse \
   sh -c 'clickhouse-client --user default --password "$CLICKHOUSE_PASSWORD" --multiquery' \
   < "$repo_root/infra/clickhouse/optional/enable-s3-cold-tier.sql"
-configured_tables="$(ch --query "SELECT count() FROM system.tables WHERE database = 'monitor' AND name IN ('error_event', 'performance_event', 'metric_event', 'behavior_event', 'profile_event', 'replay_event', 'error_hourly', 'error_hourly_correction') AND storage_policy = 'monitor_hot_cold' AND create_table_query LIKE '%TO VOLUME%' FORMAT TabSeparated")"
-[[ "$configured_tables" == "8" ]]
+configured_tables="$(ch --query "SELECT count() FROM system.tables WHERE database = 'monitor' AND name IN ('error_event', 'performance_event', 'metric_event', 'behavior_event', 'profile_event', 'span_event', 'replay_event', 'error_hourly', 'error_hourly_correction') AND storage_policy = 'monitor_hot_cold' AND create_table_query LIKE '%TO VOLUME%' FORMAT TabSeparated")"
+[[ "$configured_tables" == "9" ]]
 
 echo "S3 cold tier passed: TTL moved the part to S3 and data remained readable after ClickHouse restart."

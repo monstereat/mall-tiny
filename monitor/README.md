@@ -33,6 +33,20 @@ pnpm dev
 
 浏览器 SDK 默认通过 `/api/v1/envelope/batch` 批量上报。
 
+## OTLP Server Spans
+
+Server tracing can export OTLP/HTTP JSON to the project-scoped endpoint with the project's ingest key:
+
+```bash
+export OTEL_EXPORTER_OTLP_TRACES_ENDPOINT='http://localhost:8080/api/v1/otlp/your-project-key/v1/traces'
+export OTEL_EXPORTER_OTLP_TRACES_PROTOCOL='http/protobuf'
+export OTEL_EXPORTER_OTLP_TRACES_HEADERS='X-Monitor-Key=your-ingest-key'
+```
+
+The endpoint accepts OTLP/HTTP JSON (`application/json`) and binary protobuf (`application/x-protobuf`) `ExportTraceServiceRequest` payloads, up to 64 MiB per request. Standard OpenTelemetry Java exporters can use `http/protobuf` and point the traces endpoint here. Exporters that support OTLP/HTTP JSON can set the protocol to `http/json`. OTLP/gRPC is not supported; send it through an OpenTelemetry Collector configured for OTLP/HTTP. Compressed request bodies (`Content-Encoding: gzip`) are not supported. The endpoint maps approved service name/version/environment resource attributes, span name/kind/IDs/status, and integer HTTP status codes; other span and resource attributes are discarded before existing project ingest processing.
+
+Accepted spans are stored in the project's `span_event` table and appear alongside Browser HTTP spans in the Admin Trace detail waterfall. The query returns the approved span fields plus `serviceName` and OTLP kind; it does not return arbitrary OTLP attributes or tags.
+
 # Session Replay privacy
 
 Replay 默认将所有输入值遮罩；文本遮罩和区域屏蔽分别使用 `[data-monitor-mask]`、`[data-monitor-block]`。应用可以传入自己的 CSS selector：
@@ -68,6 +82,10 @@ The Browser SDK records a `session/start` marker by default, independent of `sam
 
 The Admin **Releases** page shows sessions, crash-free sessions, crash-free users, and unhandled errors for sessions started in the selected 24-hour, 7-day, or 30-day window. User-scoped data deletion also removes telemetry and the session marker for matching sessions inside the selected deletion range.
 
+# Server-side credential scrubbing
+
+The ingest service filters common credential fields (`password`, `authorization`, `cookie`, API keys, and access/refresh tokens) from telemetry data, device context, and nested values before cardinality accounting or Kafka publishing. It also filters those values from URLs, including query/fragment parameters and URL user-info, and removes common `Bearer`/`Basic` credentials embedded in text. Project Owners can opt into filtering email addresses, Luhn-validated payment card numbers, and valid IPv4/IPv6 addresses in **Data Governance**; the policy is applied to new events of every signal type before cardinality accounting or storage. AI provider requests and returned suggestions always scrub payment card numbers and IP addresses even when the project's ingestion filters are disabled. Existing stored events are not rewritten. `userId` and `sessionId` remain intact for issue impact, release health, and user-scoped deletion. Custom regexes and broader PII categories are not supported yet.
+
 # Cron Monitors
 
 Create a monitor in the Admin **Crons** page. Schedules can use an interval such as `5m` or a five/six-field crontab with an IANA timezone. A job reports its start, then reports `ok` or `error` with the same check-in ID:
@@ -93,6 +111,8 @@ curl -fsS -X PUT "$MONITOR_URL/api/v1/monitors/$PROJECT_KEY/daily-report/check-i
 Use `"status":"error"` on failure. Check-in IDs are idempotent; the monitor evaluates missing check-ins and jobs that exceed the configured maximum runtime. The Crons page shows recent check-in history and current health.
 
 To alert when any active Cron monitor is unhealthy, create an Alert rule using metric `cron_unhealthy_count`, operator `>=`, and threshold `1`. The rule uses the shared silence, recovery, and Webhook delivery flow. It evaluates the project-wide count of Cron monitors in `warning` or `error` health states; it returns to zero after the monitors recover or are disabled/deleted.
+
+To receive notifications when an Issue is first created or regresses after resolution, create separate Alert rules with metrics `new_issue` and `issue_regression`, and attach the desired tenant notification route or Webhook. These are event notifications: threshold, window, duration, and cooldown do not apply. Project, rule, and Issue silences still apply.
 
 # Uptime Monitors
 

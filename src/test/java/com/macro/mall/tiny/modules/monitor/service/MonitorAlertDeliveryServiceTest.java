@@ -138,6 +138,44 @@ class MonitorAlertDeliveryServiceTest {
         verify(redis).expire(eq("monitor:alert:delivery:retry"), any());
     }
 
+    @Test
+    void rejectsWebhookRedirectsWithoutForwardingAlertPayload() throws Exception {
+        mockDeliveryReads();
+        @SuppressWarnings("unchecked")
+        ZSetOperations<String, String> retries = mock(ZSetOperations.class);
+        when(redis.opsForZSet()).thenReturn(retries);
+        AtomicInteger redirectedRequests = new AtomicInteger();
+        var target = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
+        target.createContext("/target", exchange -> {
+            redirectedRequests.incrementAndGet();
+            exchange.sendResponseHeaders(204, -1);
+            exchange.close();
+        });
+        target.start();
+        var source = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
+        source.createContext("/", exchange -> {
+            exchange.getResponseHeaders().add("Location", "http://127.0.0.1:"
+                    + target.getAddress().getPort() + "/target");
+            exchange.sendResponseHeaders(302, -1);
+            exchange.close();
+        });
+        source.start();
+        try {
+            service.send(rule(source.getAddress().getPort()), alert(), project(), "firing");
+        } finally {
+            source.stop(0);
+            target.stop(0);
+        }
+
+        assertEquals(0, redirectedRequests.get());
+        var saved = org.mockito.ArgumentCaptor.forClass(MonitorAlertDeliveryEntity.class);
+        verify(deliveryMapper).updateById(saved.capture());
+        assertEquals("pending", saved.getValue().getStatus());
+        assertEquals(1, saved.getValue().getAttempts());
+        assertTrue(saved.getValue().getNextAttemptAt() > System.currentTimeMillis());
+        verify(retries).add(eq("monitor:alert:delivery:retry"), anyString(), anyDouble());
+    }
+
     private AtomicInteger mockDeliveryReads() {
         AtomicInteger reads = new AtomicInteger();
         when(deliveryMapper.selectById(anyString())).thenAnswer(invocation -> {

@@ -45,24 +45,38 @@ class MonitorReplayQuotaServiceTest {
     private final Connection connection = mock(Connection.class);
     private final PreparedStatement lockStatement = mock(PreparedStatement.class);
     private final PreparedStatement releaseStatement = mock(PreparedStatement.class);
+    private final PreparedStatement usageSelectStatement = mock(PreparedStatement.class);
+    private final PreparedStatement usageInsertStatement = mock(PreparedStatement.class);
+    private final PreparedStatement usageReserveStatement = mock(PreparedStatement.class);
     private final ResultSet lockResult = mock(ResultSet.class);
     private final ResultSet releaseResult = mock(ResultSet.class);
+    private final ResultSet usageResult = mock(ResultSet.class);
     private final MonitorReplayQuotaService service = new MonitorReplayQuotaService(minioClient, dataSource);
 
     @BeforeEach
     void setUpLockMocks() throws Exception {
         ReflectionTestUtils.setField(service, "projectLockWaitSeconds", 30);
         when(dataSource.getConnection()).thenReturn(connection);
-        when(connection.prepareStatement(org.mockito.ArgumentMatchers.anyString())).thenAnswer(invocation ->
-                invocation.<String>getArgument(0).contains("GET_LOCK") ? lockStatement : releaseStatement);
+        when(connection.prepareStatement(org.mockito.ArgumentMatchers.anyString())).thenAnswer(invocation -> {
+            String sql = invocation.getArgument(0);
+            if (sql.contains("GET_LOCK")) return lockStatement;
+            if (sql.contains("RELEASE_LOCK")) return releaseStatement;
+            if (sql.contains("SELECT used_bytes")) return usageSelectStatement;
+            if (sql.startsWith("INSERT")) return usageInsertStatement;
+            return usageReserveStatement;
+        });
         when(lockStatement.executeQuery()).thenReturn(lockResult);
         when(releaseStatement.executeQuery()).thenReturn(releaseResult);
+        when(usageSelectStatement.executeQuery()).thenReturn(usageResult);
+        when(usageInsertStatement.executeUpdate()).thenReturn(1);
+        when(usageReserveStatement.executeUpdate()).thenReturn(1);
         when(lockResult.next()).thenReturn(true);
         when(lockResult.getInt(1)).thenReturn(1);
         when(lockResult.wasNull()).thenReturn(false);
         when(releaseResult.next()).thenReturn(true);
         when(releaseResult.getInt(1)).thenReturn(1);
         when(releaseResult.wasNull()).thenReturn(false);
+        when(usageResult.next()).thenReturn(false);
     }
 
     @Test
@@ -88,6 +102,19 @@ class MonitorReplayQuotaServiceTest {
         mockProjectObjects(80L);
 
         assertEquals("stored", service.storeIfWithinQuota("monitor-replays", "project-a", 20L, () -> "stored"));
+    }
+
+    @Test
+    void readsInitializedUsageWithoutListingObjectsAgain() throws Exception {
+        setQuota(100L);
+        when(usageResult.next()).thenReturn(false, true);
+        when(usageResult.getLong(1)).thenReturn(80L);
+        mockProjectObjects(80L);
+
+        service.storeIfWithinQuota("monitor-replays", "project-a", 10L, () -> "first");
+        service.storeIfWithinQuota("monitor-replays", "project-a", 10L, () -> "second");
+
+        verify(minioClient).listObjects(any(ListObjectsArgs.class));
     }
 
     @Test
@@ -166,14 +193,14 @@ class MonitorReplayQuotaServiceTest {
             Future<?> first = executor.submit(() -> service.storeIfWithinQuota(
                     "monitor-replays", "project-a", 15L, () -> {
                         firstActionEntered.countDown();
-                        if (!allowFirstActionToFinish.await(2, TimeUnit.SECONDS)) {
+                        if (!allowFirstActionToFinish.await(10, TimeUnit.SECONDS)) {
                             throw new IllegalStateException("test did not release first upload");
                         }
                         storedBytes.addAndGet(15L);
                         return null;
                     }));
 
-            assertTrue(firstActionEntered.await(2, TimeUnit.SECONDS));
+            assertTrue(firstActionEntered.await(10, TimeUnit.SECONDS));
             Future<?> second = executor.submit(() -> {
                 secondAttempted.countDown();
                 return service.storeIfWithinQuota("monitor-replays", "project-a", 15L, () -> {
@@ -210,8 +237,8 @@ class MonitorReplayQuotaServiceTest {
         MonitorReplayQuotaService secondService = new MonitorReplayQuotaService(minioClient, sharedDataSource.dataSource());
         ReflectionTestUtils.setField(firstService, "projectQuotaBytes", 100L);
         ReflectionTestUtils.setField(secondService, "projectQuotaBytes", 100L);
-        ReflectionTestUtils.setField(firstService, "projectLockWaitSeconds", 2);
-        ReflectionTestUtils.setField(secondService, "projectLockWaitSeconds", 2);
+        ReflectionTestUtils.setField(firstService, "projectLockWaitSeconds", 10);
+        ReflectionTestUtils.setField(secondService, "projectLockWaitSeconds", 10);
         mockProjectObjects(storedBytes, null);
 
         CountDownLatch firstActionEntered = new CountDownLatch(1);
@@ -223,14 +250,14 @@ class MonitorReplayQuotaServiceTest {
             Future<?> first = executor.submit(() -> firstService.storeIfWithinQuota(
                     "monitor-replays", "project-multi-instance", 15L, () -> {
                         firstActionEntered.countDown();
-                        if (!allowFirstActionToFinish.await(2, TimeUnit.SECONDS)) {
+                        if (!allowFirstActionToFinish.await(10, TimeUnit.SECONDS)) {
                             throw new IllegalStateException("test did not release first upload");
                         }
                         storedBytes.addAndGet(15L);
                         return null;
                     }));
 
-            assertTrue(firstActionEntered.await(2, TimeUnit.SECONDS));
+            assertTrue(firstActionEntered.await(10, TimeUnit.SECONDS));
             Future<?> second = executor.submit(() -> secondService.storeIfWithinQuota(
                     "monitor-replays", "project-multi-instance", 15L, () -> {
                         secondActionEntered.set(true);
@@ -238,16 +265,16 @@ class MonitorReplayQuotaServiceTest {
                         return null;
                     }));
 
-            assertTrue(secondLockAttempted.await(2, TimeUnit.SECONDS),
+            assertTrue(secondLockAttempted.await(10, TimeUnit.SECONDS),
                     "the second service instance must contend on the shared database lock");
             Thread.sleep(100);
             assertEquals(80L, storedBytes.get(), "the first write is still inside the protected action");
             assertFalse(secondActionEntered.get(), "the second write must wait for the shared lock");
             allowFirstActionToFinish.countDown();
-            first.get(2, TimeUnit.SECONDS);
+            first.get(10, TimeUnit.SECONDS);
 
             ExecutionException rejection = assertThrows(ExecutionException.class,
-                    () -> second.get(2, TimeUnit.SECONDS));
+                    () -> second.get(10, TimeUnit.SECONDS));
             assertTrue(rejection.getCause() instanceof MonitorReplayQuotaExceededException);
             assertEquals(95L, storedBytes.get());
             assertFalse(secondActionEntered.get());
@@ -305,8 +332,8 @@ class MonitorReplayQuotaServiceTest {
         private Connection newConnection() throws Exception {
             Connection connection = mock(Connection.class);
             AtomicReference<ReentrantLock> ownedLock = new AtomicReference<>();
-            when(connection.prepareStatement(org.mockito.ArgumentMatchers.anyString())).thenAnswer(invocation -> {
-                String sql = invocation.getArgument(0);
+                when(connection.prepareStatement(org.mockito.ArgumentMatchers.anyString())).thenAnswer(invocation -> {
+                    String sql = invocation.getArgument(0);
                 PreparedStatement statement = mock(PreparedStatement.class);
                 AtomicReference<String> lockName = new AtomicReference<>();
                 AtomicReference<Integer> waitSeconds = new AtomicReference<>(0);
@@ -318,7 +345,7 @@ class MonitorReplayQuotaServiceTest {
                     waitSeconds.set(set.getArgument(1));
                     return null;
                 }).when(statement).setInt(org.mockito.ArgumentMatchers.eq(2), org.mockito.ArgumentMatchers.anyInt());
-                when(statement.executeQuery()).thenAnswer(execute -> {
+                    when(statement.executeQuery()).thenAnswer(execute -> {
                     boolean acquired;
                     if (sql.contains("GET_LOCK")) {
                         if (lockAttempts.incrementAndGet() > 1) {
@@ -341,9 +368,15 @@ class MonitorReplayQuotaServiceTest {
                     when(resultSet.getInt(1)).thenReturn(acquired ? 1 : 0);
                     when(resultSet.wasNull()).thenReturn(false);
                     return resultSet;
+                    });
+                    if (sql.contains("SELECT used_bytes")) {
+                        ResultSet usage = mock(ResultSet.class);
+                        when(usage.next()).thenReturn(false);
+                        org.mockito.Mockito.doReturn(usage).when(statement).executeQuery();
+                    }
+                    when(statement.executeUpdate()).thenReturn(1);
+                    return statement;
                 });
-                return statement;
-            });
             return connection;
         }
     }

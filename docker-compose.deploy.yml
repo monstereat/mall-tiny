@@ -162,6 +162,12 @@ services:
         condition: service_healthy
       otel-collector:
         condition: service_started
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:8081/actuator/health/readiness || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 10
+      start_period: 60s
     environment:
       SPRING_PROFILES_ACTIVE: prod
       MYSQL_PASSWORD: ${MYSQL_ROOT_PASSWORD:?Set MYSQL_ROOT_PASSWORD in the secured deployment .env}
@@ -172,6 +178,7 @@ services:
       MINIO_ACCESS_KEY: ${MINIO_ROOT_USER:?Set MINIO_ROOT_USER in the secured deployment .env}
       MINIO_SECRET_KEY: ${MINIO_ROOT_PASSWORD:?Set MINIO_ROOT_PASSWORD in the secured deployment .env}
       MONITOR_AI_ENABLED: ${MONITOR_AI_ENABLED:-false}
+      MONITOR_RATE_LIMIT_PER_MINUTE: ${MONITOR_RATE_LIMIT_PER_MINUTE:-5000}
       OPENAI_API_KEY: ${OPENAI_API_KEY:-}
       MONITOR_AI_BASE_URL: ${MONITOR_AI_BASE_URL:-https://api.openai.com/v1}
       MONITOR_AI_MODEL: ${MONITOR_AI_MODEL:-gpt-6-astra}
@@ -199,7 +206,14 @@ services:
       context: ./admin
     restart: unless-stopped
     depends_on:
-      - server
+      server:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q --spider http://127.0.0.1/ || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
     ports:
       - "8088:80"
 
@@ -209,7 +223,7 @@ services:
     restart: unless-stopped
     depends_on:
       server:
-        condition: service_started
+        condition: service_healthy
       alertmanager:
         condition: service_healthy
     ports:

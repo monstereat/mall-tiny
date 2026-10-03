@@ -23,7 +23,8 @@ class MonitorIngestServiceProfileTest {
     private final MonitorRateLimiter rateLimiter = mock(MonitorRateLimiter.class);
     private final MonitorEventProducer producer = mock(MonitorEventProducer.class);
     private final MonitorMetricCardinalityService cardinality = mock(MonitorMetricCardinalityService.class);
-    private final MonitorIngestService service = new MonitorIngestService(projects, rateLimiter, producer, cardinality);
+    private final MonitorIngestService service = new MonitorIngestService(
+            projects, rateLimiter, producer, cardinality, new MonitorEventScrubber());
 
     @Test
     void acceptsCollapsedCpuProfile() {
@@ -47,6 +48,32 @@ class MonitorIngestServiceProfileTest {
         ResponseStatusException error = assertThrows(ResponseStatusException.class, () -> service.ingest("key", event));
 
         assertEquals(400, error.getStatusCode().value());
+        verifyNoInteractions(producer);
+    }
+
+    @Test
+    void rejectsProfileWhoseFiniteSamplesOverflowTheirAggregate() {
+        MonitorEventEnvelope event = event(Map.of("format", "collapsed", "name", "CPU", "unit", "samples",
+                "samples", List.of(
+                        Map.of("stack", List.of("onClick"), "value", Double.MAX_VALUE),
+                        Map.of("stack", List.of("render"), "value", Double.MAX_VALUE))));
+
+        ResponseStatusException error = assertThrows(ResponseStatusException.class, () -> service.ingest("key", event));
+
+        assertEquals(400, error.getStatusCode().value());
+        verifyNoInteractions(producer, cardinality, rateLimiter);
+    }
+
+    @Test
+    void reportsTheConfiguredMaximumProfileSampleCount() {
+        Map<String, Object> sample = Map.of("stack", List.of("render"), "value", 1);
+        MonitorEventEnvelope event = event(Map.of("format", "collapsed", "name", "CPU", "unit", "samples",
+                "samples", java.util.Collections.nCopies(201, sample)));
+
+        ResponseStatusException error = assertThrows(ResponseStatusException.class, () -> service.ingest("key", event));
+
+        assertEquals(400, error.getStatusCode().value());
+        assertEquals("profile samples must contain 1 to 200 entries", error.getReason());
         verifyNoInteractions(producer);
     }
 

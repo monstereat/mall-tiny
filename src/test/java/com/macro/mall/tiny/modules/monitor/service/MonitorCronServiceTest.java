@@ -16,6 +16,8 @@ import org.springframework.web.server.ResponseStatusException;
 
 import java.util.Date;
 import java.util.List;
+import java.time.Instant;
+import java.time.temporal.ChronoUnit;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
@@ -146,6 +148,43 @@ class MonitorCronServiceTest {
         assertEquals(1, cron.getConsecutiveFailures());
         assertEquals("error", cron.getHealthStatus());
         verify(cronMapper).updateById(cron);
+    }
+
+    @Test
+    void prunesCheckInsOlderThanNinetyDaysInBoundedBatches() {
+        when(checkInMapper.deleteCompletedBefore(any(Date.class), org.mockito.ArgumentMatchers.anyInt()))
+                .thenReturn(1000, 27);
+        when(checkInMapper.deleteStaleInProgressBefore(any(Date.class), org.mockito.ArgumentMatchers.anyInt()))
+                .thenReturn(1000, 13);
+
+        service().pruneExpiredCheckIns();
+
+        org.mockito.ArgumentCaptor<Date> cutoff = org.mockito.ArgumentCaptor.forClass(Date.class);
+        verify(checkInMapper, org.mockito.Mockito.times(2))
+                .deleteCompletedBefore(cutoff.capture(), org.mockito.ArgumentMatchers.eq(1000));
+        org.mockito.ArgumentCaptor<Date> inProgressCutoff = org.mockito.ArgumentCaptor.forClass(Date.class);
+        verify(checkInMapper, org.mockito.Mockito.times(2))
+                .deleteStaleInProgressBefore(inProgressCutoff.capture(), org.mockito.ArgumentMatchers.eq(1000));
+        Date expectedCutoff = Date.from(Instant.now().minus(90, ChronoUnit.DAYS));
+        assertTrue(Math.abs(cutoff.getAllValues().get(0).getTime() - expectedCutoff.getTime()) < 1000);
+        assertEquals(cutoff.getAllValues().get(0), cutoff.getAllValues().get(1));
+        assertEquals(cutoff.getAllValues().get(0), inProgressCutoff.getAllValues().get(0));
+        assertEquals(cutoff.getAllValues().get(0), inProgressCutoff.getAllValues().get(1));
+    }
+
+    @Test
+    void capsCleanupWorkPerRunWhenExpiredRowsRemain() {
+        when(checkInMapper.deleteCompletedBefore(any(Date.class), org.mockito.ArgumentMatchers.anyInt()))
+                .thenReturn(1000);
+        when(checkInMapper.deleteStaleInProgressBefore(any(Date.class), org.mockito.ArgumentMatchers.anyInt()))
+                .thenReturn(1000);
+
+        service().pruneExpiredCheckIns();
+
+        verify(checkInMapper, org.mockito.Mockito.times(10))
+                .deleteCompletedBefore(any(Date.class), org.mockito.ArgumentMatchers.eq(1000));
+        verify(checkInMapper, org.mockito.Mockito.times(10))
+                .deleteStaleInProgressBefore(any(Date.class), org.mockito.ArgumentMatchers.eq(1000));
     }
 
     private MonitorCronRequest request(String type, String schedule) {

@@ -7,6 +7,7 @@ export interface MonitorProject {
   projectKey: string;
   platform: string;
   status: number;
+  canWrite?: boolean;
 }
 
 export interface ProfileSummary {
@@ -236,6 +237,16 @@ export interface MonitorDataDeletionJob {
   finishedAt?: string;
 }
 
+export interface MonitorDataScrubbingSettings {
+  scrubEmails: boolean;
+  scrubCreditCards: boolean;
+  scrubIpAddresses: boolean;
+  scrubPhoneNumbers: boolean;
+  scrubChineseIdNumbers: boolean;
+  customSensitiveFields: string[];
+  canModify: boolean;
+}
+
 export interface PerformanceData {
   summary: Array<{ metric: string; avgValue: number; p75: number; p95: number; samples: number }>;
   trend: Array<{ bucket: string; metric: string; value: number }>;
@@ -251,6 +262,16 @@ export interface MetricData {
 export interface ApiData {
   summary: Array<{ url: string; requests: number; avgRt: number; p95: number; failures: number }>;
   trend: Array<{ bucket: string; requests: number; failures: number; avgRt: number }>;
+}
+
+export interface MonitorDashboard {
+  id: number;
+  name: string;
+  queryIds: number[];
+  createdBy: number;
+  canModify: boolean;
+  createTime?: string;
+  updateTime?: string;
 }
 
 export interface DashboardData {
@@ -304,6 +325,23 @@ export interface IssueDetail {
   events: IssueEvent[];
 }
 
+export interface IssueActivity {
+  id: number;
+  activityType: 'comment' | 'status';
+  actorAdminId: number;
+  actorName: string;
+  commentText?: string;
+  previousStatus?: string;
+  newStatus?: string;
+  createTime: string;
+}
+
+export interface IssueActivityPage {
+  records: IssueActivity[];
+  hasMore: boolean;
+  nextBeforeId?: number;
+}
+
 export interface IssueAiAnalysis {
   summary: string;
   severity: 'low' | 'medium' | 'high' | 'critical';
@@ -311,6 +349,7 @@ export interface IssueAiAnalysis {
   possibleCauses: string[];
   recommendations: string[];
   evidence: string[];
+  limitations: string[];
 }
 
 export interface MonitorLogEntry {
@@ -325,6 +364,36 @@ export interface MonitorLogSearchResult {
   entries: MonitorLogEntry[];
 }
 
+export interface MonitorTraceSummary {
+  traceId: string;
+  firstEventAt: string;
+  lastEventAt: string;
+  eventCount: number;
+  environment: string;
+  release: string;
+  signalTypes: string[];
+}
+
+export interface MonitorTracePage {
+  records: MonitorTraceSummary[];
+  total: number;
+}
+
+export interface MonitorTraceSpan {
+  traceId: string;
+  spanId: string;
+  parentSpanId?: string;
+  source: 'browser' | 'server';
+  serviceName: string;
+  kind: string;
+  op: string;
+  description: string;
+  startTime: number;
+  durationMs: number;
+  status: 'ok' | 'error';
+  statusCode?: number;
+}
+
 export interface MonitorExploreEvent {
   signal_type: 'error' | 'performance' | 'behavior' | 'replay' | 'metric' | 'profile' | 'logs';
   event_id: string;
@@ -337,6 +406,8 @@ export interface MonitorExploreEvent {
   fingerprint: string;
   session_id: string;
   payload: string;
+  user_id?: string;
+  monitor_tags?: string;
 }
 
 export interface MonitorExploreResult {
@@ -494,6 +565,10 @@ export const monitorApi = {
     '/monitor/sso/exchange', { method: 'POST', body: JSON.stringify({ code }) }, false
   ),
   dataDeletionJobs: (projectKey: string) => request<MonitorDataDeletionJob[]>(projectUrl(projectKey, '/data-deletion')),
+  dataScrubbingSettings: (projectKey: string) =>
+    request<MonitorDataScrubbingSettings>(projectUrl(projectKey, '/data-scrubbing')),
+  saveDataScrubbingSettings: (projectKey: string, payload: Pick<MonitorDataScrubbingSettings, 'scrubEmails' | 'scrubCreditCards' | 'scrubIpAddresses' | 'scrubPhoneNumbers' | 'scrubChineseIdNumbers' | 'customSensitiveFields'>) =>
+    request<MonitorDataScrubbingSettings>(projectUrl(projectKey, '/data-scrubbing'), { method: 'PUT', body: JSON.stringify(payload) }),
   previewDataDeletion: (projectKey: string, payload: { from: string; to: string; userId?: string }) =>
     request<MonitorDataDeletionJob>(projectUrl(projectKey, '/data-deletion/preview'), { method: 'POST', body: JSON.stringify(payload) }),
   executeDataDeletion: (projectKey: string, jobId: number, previewToken: string) =>
@@ -573,6 +648,18 @@ export const monitorApi = {
     request<void>(`/monitor/admin/projects/${encodeURIComponent(projectKey)}/members/${adminId}`, {
       method: 'DELETE'
     }),
+  dashboards: (projectKey: string) =>
+    request<MonitorDashboard[]>(projectUrl(projectKey, '/dashboards')),
+  createDashboard: (projectKey: string, payload: { name: string; queryIds: number[] }) =>
+    request<MonitorDashboard>(projectUrl(projectKey, '/dashboards'), {
+      method: 'POST', body: JSON.stringify(payload)
+    }),
+  updateDashboard: (projectKey: string, id: number, payload: { name: string; queryIds: number[] }) =>
+    request<MonitorDashboard>(projectUrl(projectKey, `/dashboards/${id}`), {
+      method: 'PUT', body: JSON.stringify(payload)
+    }),
+  deleteDashboard: (projectKey: string, id: number) =>
+    request<void>(projectUrl(projectKey, `/dashboards/${id}`), { method: 'DELETE' }),
   dashboard: (projectKey: string, hours = 24, environment = '', release = '') => {
     const query = new URLSearchParams({ hours: String(hours) });
     if (environment) query.set('environment', environment);
@@ -585,27 +672,60 @@ export const monitorApi = {
     pageSize = 20,
     status = '',
     hours = 720,
-    release = ''
+    release = '',
+    sort = 'lastSeen',
+    searchText = '',
+    environment = ''
   ) => {
     const query = new URLSearchParams({
       pageNum: String(pageNum),
       pageSize: String(pageSize),
       status,
-      hours: String(hours)
+      hours: String(hours),
+      sort
     });
     if (release) query.set('release', release);
+    if (searchText) query.set('query', searchText);
+    if (environment) query.set('environment', environment);
     return request<PageResult<MonitorIssue>>(projectUrl(projectKey, `/issues?${query}`));
   },
   issue: (projectKey: string, id: string | number) =>
     request<IssueDetail>(projectUrl(projectKey, `/issues/${id}`)),
+  issueActivities: (projectKey: string, id: string | number, beforeId?: number, limit = 50) => {
+    const query = new URLSearchParams({ limit: String(limit) });
+    if (beforeId) query.set('beforeId', String(beforeId));
+    return request<IssueActivityPage>(projectUrl(projectKey, `/issues/${id}/activities?${query}`));
+  },
+  addIssueComment: (projectKey: string, id: string | number, comment: string) =>
+    request<IssueActivity>(projectUrl(projectKey, `/issues/${id}/activities/comments`), {
+      method: 'POST', body: JSON.stringify({ comment })
+    }),
   analyzeIssue: (projectKey: string, id: string | number) =>
     request<IssueAiAnalysis>(projectUrl(projectKey, `/issues/${id}/ai-analysis`), { method: 'POST' }),
-  logs: (projectKey: string, traceId?: string, hours = 24, limit = 200, text?: string) => {
+  logs: (projectKey: string, traceId?: string, hours = 24, limit = 200, text?: string,
+    userId?: string, tagKey?: string, tagValue?: string) => {
     const query = new URLSearchParams({ hours: String(hours), limit: String(limit) });
     if (traceId) query.set('traceId', traceId);
     if (text) query.set('query', text);
+    if (userId) query.set('userId', userId);
+    if (tagKey) query.set('tagKey', tagKey);
+    if (tagValue) query.set('tagValue', tagValue);
     return request<MonitorLogSearchResult>(projectUrl(projectKey, `/logs?${query}`));
   },
+  traces: (projectKey: string, params: {
+    hours: number; environment?: string; release?: string; pageNum?: number; pageSize?: number;
+  }) => {
+    const query = new URLSearchParams({
+      hours: String(params.hours),
+      pageNum: String(params.pageNum || 1),
+      pageSize: String(params.pageSize || 20)
+    });
+    if (params.environment) query.set('environment', params.environment);
+    if (params.release) query.set('release', params.release);
+    return request<MonitorTracePage>(projectUrl(projectKey, `/traces?${query}`));
+  },
+  traceSpans: (projectKey: string, traceId: string) =>
+    request<MonitorTraceSpan[]>(projectUrl(projectKey, `/traces/${encodeURIComponent(traceId)}/spans`)),
   explore: (projectKey: string, params: {
     hours: number; type?: string; environment?: string; release?: string;
     traceId?: string; query?: string; userId?: string; tagKey?: string; tagValue?: string;

@@ -6,5 +6,6 @@ public enum MonitorEventType {
     BEHAVIOR,
     REPLAY,
     METRIC,
-    PROFILE
+    PROFILE,
+    SPAN
 }

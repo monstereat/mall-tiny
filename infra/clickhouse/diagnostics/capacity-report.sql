@@ -29,6 +29,7 @@ WITH
         UNION ALL SELECT 'metric_event', 90
         UNION ALL SELECT 'behavior_event', 30
         UNION ALL SELECT 'profile_event', 30
+        UNION ALL SELECT 'span_event', 30
         UNION ALL SELECT 'replay_event', 14
         UNION ALL SELECT 'error_hourly', 365
         UNION ALL SELECT 'error_hourly_correction', 400
@@ -44,6 +45,7 @@ WITH
             UNION ALL SELECT 'metric_event', event_time FROM monitor.metric_event
             UNION ALL SELECT 'behavior_event', event_time FROM monitor.behavior_event
             UNION ALL SELECT 'profile_event', event_time FROM monitor.profile_event
+            UNION ALL SELECT 'span_event', event_time FROM monitor.span_event
             UNION ALL SELECT 'replay_event', event_time FROM monitor.replay_event
             UNION ALL SELECT 'error_hourly', bucket FROM monitor.error_hourly
             UNION ALL SELECT 'error_hourly_correction', bucket FROM monitor.error_hourly_correction

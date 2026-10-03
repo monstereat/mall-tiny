@@ -8,5 +8,6 @@ public record MonitorIssueAiAnalysis(
         double confidence,
         List<String> possibleCauses,
         List<String> recommendations,
-        List<String> evidence) {
+        List<String> evidence,
+        List<String> limitations) {
 }

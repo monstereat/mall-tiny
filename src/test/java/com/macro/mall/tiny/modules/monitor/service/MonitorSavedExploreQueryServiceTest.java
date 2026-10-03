@@ -76,6 +76,42 @@ class MonitorSavedExploreQueryServiceTest {
         verify(mapper).deleteById(12L);
     }
 
+    @Test
+    void savesLogsGroupingByLevelWithEnvironmentFilter() {
+        MonitorSavedExploreQueryRequest request = new MonitorSavedExploreQueryRequest();
+        request.setName("production errors");
+        request.setType("logs");
+        request.setEnvironment("production");
+        request.setGroupBy("level");
+        request.setAggregation("count");
+        request.setField("value");
+
+        var saved = service.create(project, request);
+
+        assertEquals("level", saved.criteria().getGroupBy());
+        assertEquals("production", saved.criteria().getEnvironment());
+        verify(mapper).insert(any(MonitorSavedExploreQuery.class));
+    }
+
+    @Test
+    void rejectsUnsupportedLogsGroupingAndWindowsWhenSaving() {
+        MonitorSavedExploreQueryRequest request = new MonitorSavedExploreQueryRequest();
+        request.setName("logs by url");
+        request.setType("logs");
+        request.setGroupBy("url");
+
+        ResponseStatusException invalidGroup = assertThrows(ResponseStatusException.class,
+                () -> service.create(project, request));
+        assertEquals(400, invalidGroup.getStatusCode().value());
+
+        request.setGroupBy("signal");
+        request.setHours(720);
+        ResponseStatusException invalidWindow = assertThrows(ResponseStatusException.class,
+                () -> service.create(project, request));
+        assertEquals(400, invalidWindow.getStatusCode().value());
+        verify(mapper, never()).insert(any(MonitorSavedExploreQuery.class));
+    }
+
     private MonitorSavedExploreQuery saved(Long id, Long creator, String name) {
         MonitorSavedExploreQuery query = new MonitorSavedExploreQuery();
         query.setId(id);

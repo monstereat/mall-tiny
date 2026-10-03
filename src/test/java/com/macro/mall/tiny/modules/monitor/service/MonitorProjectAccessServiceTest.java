@@ -108,6 +108,16 @@ class MonitorProjectAccessServiceTest {
     }
 
     @Test
+    void onlyProjectOwnerCanManageDataScrubbingSettings() {
+        when(tenantMemberMapper.selectOne(any())).thenReturn(tenantMembership("MEMBER"));
+        stubMembership("OWNER");
+        assertEquals(true, accessService.canManageProject(projectFixture()));
+
+        stubMembership("MEMBER");
+        assertEquals(false, accessService.canManageProject(projectFixture()));
+    }
+
+    @Test
     void nonMemberCannotLearnProjectExists() {
         when(tenantMemberMapper.selectOne(any())).thenReturn(tenantMembership("MEMBER"));
         when(memberMapper.selectOne(any())).thenReturn(null);
@@ -156,6 +166,47 @@ class MonitorProjectAccessServiceTest {
 
         assertEquals(PROJECT_ID, accessService.requireProject("demo", false).getId());
         assertForbidden(() -> accessService.requireProject("demo", true));
+    }
+
+    @Test
+    void projectListExposesWritePermissionUsingTenantAndProjectRoles() {
+        MonitorProject writableProject = projectFixture();
+        MonitorProject readOnlyProject = projectFixture();
+        writableProject.setId(17L);
+        readOnlyProject.setId(18L);
+        when(tenantMemberMapper.selectList(any())).thenReturn(List.of(tenantMembership("MEMBER")));
+        when(memberMapper.selectList(any())).thenReturn(List.of(
+                membership(17L, "MEMBER"), membership(18L, "VIEWER")
+        ));
+        when(teamMemberMapper.selectList(any())).thenReturn(List.of());
+        when(projectMapper.selectList(any())).thenReturn(List.of(writableProject, readOnlyProject));
+
+        List<MonitorProject> projects = accessService.listProjects();
+
+        assertEquals(true, projects.get(0).getCanWrite());
+        assertEquals(false, projects.get(1).getCanWrite());
+    }
+
+    @Test
+    void tenantViewerProjectListIsReadOnlyEvenForProjectOwner() {
+        MonitorProject project = projectFixture();
+        when(tenantMemberMapper.selectList(any())).thenReturn(List.of(tenantMembership("VIEWER")));
+        when(memberMapper.selectList(any())).thenReturn(List.of(membership("OWNER")));
+        when(teamMemberMapper.selectList(any())).thenReturn(List.of());
+        when(projectMapper.selectList(any())).thenReturn(List.of(project));
+
+        assertEquals(false, accessService.listProjects().get(0).getCanWrite());
+    }
+
+    @Test
+    void projectListUsesTeamRoleWhenNoDirectProjectRoleExists() {
+        MonitorProject project = projectFixture();
+        when(tenantMemberMapper.selectList(any())).thenReturn(List.of(tenantMembership("MEMBER")));
+        when(memberMapper.selectList(any())).thenReturn(List.of());
+        when(teamMemberMapper.selectList(any())).thenReturn(List.of(teamMembership("VIEWER")));
+        when(projectMapper.selectList(any())).thenReturn(List.of(project), List.of(project));
+
+        assertEquals(false, accessService.listProjects().get(0).getCanWrite());
     }
 
     @Test
@@ -230,8 +281,12 @@ class MonitorProjectAccessServiceTest {
     }
 
     private MonitorProjectMember membership(String role) {
+        return membership(PROJECT_ID, role);
+    }
+
+    private MonitorProjectMember membership(Long projectId, String role) {
         MonitorProjectMember membership = new MonitorProjectMember();
-        membership.setProjectId(PROJECT_ID);
+        membership.setProjectId(projectId);
         membership.setAdminId(CURRENT_ADMIN_ID);
         membership.setRole(role);
         return membership;

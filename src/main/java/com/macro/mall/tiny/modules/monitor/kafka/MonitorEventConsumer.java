@@ -85,6 +85,11 @@ public class MonitorEventConsumer {
         persistBatch(records, MonitorEventType.PROFILE);
     }
 
+    @KafkaListener(topics = "${monitor.kafka.topics.span:monitor-span-v1}")
+    public void consumeSpan(List<ConsumerRecord<String, String>> records) {
+        persistBatch(records, MonitorEventType.SPAN);
+    }
+
     private void persistBatch(List<ConsumerRecord<String, String>> records, MonitorEventType expectedType) {
         if (records == null || records.isEmpty()) {
             return;

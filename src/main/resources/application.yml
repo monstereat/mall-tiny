@@ -141,6 +141,7 @@ secure:
       - /admin/info
       - /admin/logout
       - /api/v1/envelope
+      - /api/v1/otlp/**
       - /scim/v2/**
       - /saml2/**
       - /login/saml2/**

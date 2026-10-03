@@ -110,10 +110,10 @@ public class MonitorScimService {
             admin.setUsername(userName);
             admin.setPassword(passwordEncoder.encode(randomPassword()));
             admin.setCreateTime(new Date());
+            admin.setStatus(1);
         }
         admin.setEmail(email);
         admin.setNickName(displayName);
-        admin.setStatus(active ? 1 : 0);
         if (reuseDeletedScimAccount) {
             adminMapper.updateById(admin);
         } else {
@@ -368,23 +368,11 @@ public class MonitorScimService {
             scimUserMapper.updateById(identity);
         }
         if (active) {
-            UmsAdmin admin = adminMapper.selectById(identity.getAdminId());
-            if (admin != null && !Objects.equals(admin.getStatus(), 1)) {
-                admin.setStatus(1);
-                adminMapper.updateById(admin);
-                adminService.getCacheService().delAdmin(admin.getId());
-            }
             ensureTenantMember(context.tenantId(), identity.getAdminId());
         } else {
             tenantMemberMapper.delete(Wrappers.<MonitorTenantMember>lambdaQuery()
                     .eq(MonitorTenantMember::getTenantId, context.tenantId())
                     .eq(MonitorTenantMember::getAdminId, identity.getAdminId()));
-            UmsAdmin admin = adminMapper.selectById(identity.getAdminId());
-            if (admin != null) {
-                admin.setStatus(0);
-                adminMapper.updateById(admin);
-                adminService.getCacheService().delAdmin(admin.getId());
-            }
         }
     }
 
