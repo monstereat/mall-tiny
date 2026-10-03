@@ -2,6 +2,14 @@ x-monitor-service-labels: &monitor-service-labels
   com.monstereat.observability: "true"
 
 services:
+  server:
+    environment:
+      MONITOR_DATA_DELETION_LOKI_POLL_DELAY_MS: 30000
+
+  loki:
+    volumes:
+      - ./infra/loki/config-e2e.yml:/etc/loki/config.yml:ro
+
   prometheus:
     labels: *monitor-service-labels
     depends_on:

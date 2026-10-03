@@ -47,6 +47,9 @@ test('a real browser error reopens a resolved Issue as a regression without assi
   const eventTimes: number[] = [];
   const observedErrors: Array<Record<string, unknown>> = [];
   let lastReleaseHealth: Record<string, unknown> | null = null;
+  let lastDeletionStatus: Record<string, unknown> | null = null;
+  let lastDeletionFailure: Record<string, unknown> | null = null;
+  let cleanupAttempted = false;
 
   const observeError = (message = errorMessage) => page.waitForRequest(candidate => {
     if (candidate.url() !== batchUrl || candidate.method() !== 'POST') return false;
@@ -121,6 +124,7 @@ test('a real browser error reopens a resolved Issue as a regression without assi
   };
 
   const deleteRunData = async () => {
+    cleanupAttempted = true;
     if (eventTimes.length) {
       const safeDeletionTime = Math.max(...eventTimes) + 10_000;
       await expect.poll(() => Date.now(), { timeout: 20_000 }).toBeGreaterThan(safeDeletionTime);
@@ -149,11 +153,19 @@ test('a real browser error reopens a resolved Issue as a regression without assi
       `${serverUrl}/monitor/admin/demo-web/data-deletion/${previewBody.data.id}/execute`,
       { headers, data: { previewToken: previewBody.data.previewToken } }
     );
-    expect(executeResponse.ok()).toBeTruthy();
+    if (!executeResponse.ok()) {
+      lastDeletionFailure = { jobId: previewBody.data.id, executeStatus: executeResponse.status() };
+    }
+    expect(executeResponse.ok(), `data deletion execute returned HTTP ${executeResponse.status()}`).toBeTruthy();
     await expect.poll(async () => {
       const response = await request.get(`${serverUrl}/monitor/admin/demo-web/data-deletion/${previewBody.data.id}`, { headers });
       if (!response.ok()) return null;
-      const body = await response.json() as { data: { status: string } };
+      const body = await response.json() as { data: { status: string; stage?: string } };
+      lastDeletionStatus = {
+        jobId: previewBody.data.id,
+        status: body.data.status,
+        stage: body.data.stage
+      };
       return body.data.status;
     }, { timeout: 90_000, intervals: [1000, 2000, 5000] }).toBe('COMPLETED');
   };
@@ -255,6 +267,8 @@ test('a real browser error reopens a resolved Issue as a regression without assi
       observedErrors,
       issueEvents,
       lastReleaseHealth,
+      lastDeletionStatus,
+      lastDeletionFailure,
       failure: error instanceof Error ? error.message : String(error)
     };
     const diagnosticBody = JSON.stringify(diagnostics, null, 2);
@@ -267,6 +281,12 @@ test('a real browser error reopens a resolved Issue as a regression without assi
     await writeFile(outputPath, diagnosticBody, 'utf8');
     throw error;
   } finally {
-    if (!cleanupComplete) await deleteRunData();
+    if (!cleanupComplete && !cleanupAttempted) {
+      try {
+        await deleteRunData();
+      } catch (cleanupError) {
+        console.error(`Best-effort data deletion cleanup failed: ${cleanupError instanceof Error ? cleanupError.message : String(cleanupError)}`);
+      }
+    }
   }
 });
