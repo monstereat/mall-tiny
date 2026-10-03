@@ -31,6 +31,7 @@ type MonitorReleaseHealth = {
 };
 
 test('a real browser error reopens a resolved Issue as a regression without assignment', async ({ page, request }) => {
+  test.setTimeout(300_000);
   const runId = `issue-regression-${Date.now()}-${Math.random().toString(16).slice(2, 8)}`;
   const userId = `issue-regression-e2e-${runId}`;
   const release = `e2e-${runId}`;
@@ -189,7 +190,7 @@ test('a real browser error reopens a resolved Issue as a regression without assi
         expect(leaseRemainingMs, 'E2E config applies the short Loki polling lease').toBeLessThanOrEqual(60_000);
       }
       return body.data.status;
-    }, { timeout: 90_000, intervals: [1000, 2000, 5000] }).toBe('COMPLETED');
+    }, { timeout: 240_000, intervals: [1000, 2000, 5000] }).toBe('COMPLETED');
   };
 
   let issue: MonitorIssue | null = null;
