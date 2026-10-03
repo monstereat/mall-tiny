@@ -4,7 +4,7 @@ x-monitor-service-labels: &monitor-service-labels
 services:
   server:
     environment:
-      MONITOR_DATA_DELETION_LOKI_POLL_DELAY_MS: 30000
+      MONITOR_DATADELETION_LOKIPOLLDELAYMS: 30000
 
   loki:
     volumes:
