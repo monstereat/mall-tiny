@@ -139,7 +139,7 @@ class MonitorDataDeletionServiceTest {
     }
 
     @Test
-    void userScopedEventSnapshotBindsCutoffBeforeUserAndCursor() throws Exception {
+    void userScopedEventSnapshotBindsSessionLookupAndCursorAfterCutoff() throws Exception {
         MonitorDataDeletionJob job = deletionJob("user-1");
         when(clickHouse.queryForList(any(String.class), any(Object[].class))).thenReturn(java.util.List.of());
         var select = MonitorDataDeletionService.class.getDeclaredMethod(
@@ -152,7 +152,10 @@ class MonitorDataDeletionServiceTest {
         verify(clickHouse).queryForList(any(String.class), args.capture());
         assertEquals(new Timestamp(job.getStartedAt().getTime()), args.getValue()[3]);
         assertEquals("user-1", args.getValue()[4]);
-        assertEquals("cursor", args.getValue()[5]);
+        assertEquals("demo-web", args.getValue()[5]);
+        assertEquals(new Timestamp(job.getStartedAt().getTime()), args.getValue()[8]);
+        assertEquals("user-1", args.getValue()[9]);
+        assertEquals("cursor", args.getValue()[10]);
     }
 
     @Test
@@ -190,6 +193,45 @@ class MonitorDataDeletionServiceTest {
                 () -> service.execute("demo", 3L, "token"));
         assertEquals(409, error.getStatusCode().value());
         verify(jobMapper, never()).updateById(any(MonitorDataDeletionJob.class));
+    }
+
+    @Test
+    void userDeletionSnapshotsSessionRowsAndKeepsTheSnapshotCutoff() {
+        MonitorDataDeletionJob job = deletionJob("release-health-user");
+        when(clickHouse.queryForList(anyString(), any(Object[].class))).thenReturn(java.util.List.of());
+
+        org.springframework.test.util.ReflectionTestUtils.invokeMethod(
+                service, "selectEventBatch", "behavior_event", job, "");
+
+        org.mockito.ArgumentCaptor<String> sql = org.mockito.ArgumentCaptor.forClass(String.class);
+        org.mockito.ArgumentCaptor<Object[]> args = org.mockito.ArgumentCaptor.forClass(Object[].class);
+        verify(clickHouse).queryForList(sql.capture(), args.capture());
+        assertTrue(sql.getValue().contains("session_id IN (SELECT session_id FROM monitor.behavior_event"));
+        assertTrue(sql.getValue().contains("received_at<=?"));
+        assertTrue(sql.getValue().contains("JSONExtractString(payload,'data','action')='start'"));
+        assertEquals("release-health-user", args.getValue()[4]);
+        assertEquals("release-health-user", args.getValue()[9]);
+        assertEquals(11, args.getValue().length);
+    }
+
+    @Test
+    void userDeletionPreviewIncludesAssociatedSessionRows() {
+        when(clickHouse.queryForObject(anyString(), org.mockito.ArgumentMatchers.eq(Long.class), any(Object[].class)))
+                .thenReturn(3L);
+        Instant from = Instant.now().minusSeconds(3600);
+        Instant to = Instant.now();
+
+        Long count = org.springframework.test.util.ReflectionTestUtils.invokeMethod(
+                service, "countEvents", "behavior_event", "demo-web", from, to, "release-health-user");
+
+        assertEquals(3L, count);
+        org.mockito.ArgumentCaptor<String> sql = org.mockito.ArgumentCaptor.forClass(String.class);
+        org.mockito.ArgumentCaptor<Object[]> args = org.mockito.ArgumentCaptor.forClass(Object[].class);
+        verify(clickHouse).queryForObject(sql.capture(), org.mockito.ArgumentMatchers.eq(Long.class), args.capture());
+        assertTrue(sql.getValue().contains("session_id IN (SELECT session_id FROM monitor.behavior_event"));
+        assertEquals("release-health-user", args.getValue()[3]);
+        assertEquals("release-health-user", args.getValue()[7]);
+        assertEquals(8, args.getValue().length);
     }
 
     @Test

@@ -25,6 +25,7 @@ class MonitorExploreLogFilterTest {
             mock(MonitorAlertSilenceService.class),
             mock(MonitorAlertDeliveryService.class),
             mock(MonitorLogQueryService.class),
+            mock(MonitorReleaseHealthService.class),
             mock(MonitorSavedExploreQueryService.class),
             mock(MonitorAlertNotificationRouteService.class)
     );
@@ -47,6 +48,16 @@ class MonitorExploreLogFilterTest {
         ResponseStatusException exception = assertThrows(ResponseStatusException.class,
                 () -> controller.explore("store-a", 24, "logs", null, null, null,
                         "(trace:abc OR trace:def)", null, null, null, 100, 0));
+
+        assertEquals(400, exception.getStatusCode().value());
+    }
+
+    @Test
+    void rejectsReleaseHealthWindowsLongerThanThirtyDays() {
+        when(adminService.requireProject("store-a")).thenReturn(new MonitorProject());
+
+        ResponseStatusException exception = assertThrows(ResponseStatusException.class,
+                () -> controller.releaseHealth("store-a", 721));
 
         assertEquals(400, exception.getStatusCode().value());
     }

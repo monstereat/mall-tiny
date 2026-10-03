@@ -62,6 +62,12 @@ client.recordMetric('checkout.duration_ms', 128, {
 
 Metric names use letters, digits, `_`, `:`, `.`, or `-` (up to 128 characters). Each sample accepts at most 20 scalar dimensions; dimension keys are limited to 64 characters and values to 128. Samples are project-rate-limited like other telemetry and retained in ClickHouse for 90 days. The Admin Metrics and Explore pages query these samples, and alert rules can use a custom metric name.
 
+# Release Health
+
+The Browser SDK records a `session/start` marker by default, independent of `sampleRate`, so Release Health uses an unsampled session denominator. Changing the user with `client.setUser()` ends the current session and starts a new one, keeping each session associated with one user identity. Set `releaseHealth: false` to disable lifecycle markers. Global JavaScript errors and unhandled promise rejections count as unhandled errors; resource load errors and explicit `captureException()` calls do not.
+
+The Admin **Releases** page shows sessions, crash-free sessions, crash-free users, and unhandled errors for sessions started in the selected 24-hour, 7-day, or 30-day window. User-scoped data deletion also removes telemetry and the session marker for matching sessions inside the selected deletion range.
+
 # Cron Monitors
 
 Create a monitor in the Admin **Crons** page. Schedules can use an interval such as `5m` or a five/six-field crontab with an IANA timezone. A job reports its start, then reports `ok` or `error` with the same check-in ID:

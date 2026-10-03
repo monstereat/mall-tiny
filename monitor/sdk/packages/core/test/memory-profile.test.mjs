@@ -19,6 +19,7 @@ function makeClient(options = {}) {
     ingestKey: 'ingest-key',
     flushInterval: 0,
     persistQueue: false,
+    releaseHealth: false,
     ...options
   });
   clients.push(client);
@@ -32,6 +33,31 @@ afterEach(async () => {
     else delete globalThis[name];
   }
   originalDescriptors.clear();
+});
+
+test('release health session markers bypass event sampling and track user sessions', async () => {
+  const batches = [];
+  replaceGlobal('fetch', async (_url, init) => {
+    batches.push(JSON.parse(init.body));
+    return { ok: true };
+  });
+
+  const client = makeClient({ releaseHealth: true, sampleRate: 0, batchSize: 1 });
+  await new Promise(resolve => setTimeout(resolve, 0));
+  const anonymousSession = client.getSessionId();
+  client.setUser('release-health-user');
+  const authenticatedSession = client.getSessionId();
+  await client.close();
+
+  const events = batches.flatMap(batch => batch.events);
+  const starts = events.filter(event => event.data.category === 'session' && event.data.action === 'start');
+  const ends = events.filter(event => event.data.category === 'session' && event.data.action === 'end');
+  assert.equal(starts.length, 2);
+  assert.equal(ends.length, 2);
+  assert.equal(starts[0].sessionId, anonymousSession);
+  assert.equal(starts[1].sessionId, authenticatedSession);
+  assert.notEqual(anonymousSession, authenticatedSession);
+  assert.equal(starts[1].userId, 'release-health-user');
 });
 
 test('memory profiling stays disabled by default', async () => {

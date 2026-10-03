@@ -1,6 +1,7 @@
 import { expect, test, type Request } from '@playwright/test';
 
 const serverUrl = 'http://localhost:8080';
+const releaseHealthServerUrl = process.env.RELEASE_HEALTH_SERVER_URL ?? serverUrl;
 const batchUrl = `${serverUrl}/api/v1/envelope/batch`;
 
 type MonitorIssue = {
@@ -11,6 +12,18 @@ type MonitorIssue = {
   eventCount: number;
   resolvedAt: string | null;
   regressedAt: string | null;
+};
+
+type MonitorReleaseHealth = {
+  release: string;
+  environment: string;
+  sessions: number;
+  crashedSessions: number;
+  crashFreeSessionsRate: number;
+  users: number;
+  crashedUsers: number;
+  crashFreeUsersRate: number;
+  unhandledErrors: number;
 };
 
 test('a real browser error reopens a resolved Issue as a regression without assignment', async ({ page, request }) => {
@@ -28,6 +41,7 @@ test('a real browser error reopens a resolved Issue as a regression without assi
   const authBody = await authResponse.json() as { data: { token: string } };
   const headers = { Authorization: `Bearer ${authBody.data.token}` };
   const issueListUrl = `${serverUrl}/monitor/admin/demo-web/issues?pageNum=1&pageSize=100&hours=720&release=${encodeURIComponent(release)}`;
+  const releaseHealthUrl = `${releaseHealthServerUrl}/monitor/admin/demo-web/release-health?hours=168`;
   const eventTimes: number[] = [];
 
   const observeError = () => page.waitForRequest(candidate => {
@@ -48,6 +62,13 @@ test('a real browser error reopens a resolved Issue as a regression without assi
     if (!response.ok()) return null;
     const body = await response.json() as { data: { records: MonitorIssue[] } };
     return body.data.records.find(issue => issue.title.includes(errorMessage)) ?? null;
+  };
+
+  const fetchReleaseHealth = async (): Promise<MonitorReleaseHealth | null> => {
+    const response = await request.get(releaseHealthUrl, { headers });
+    if (!response.ok()) return null;
+    const body = await response.json() as { data: MonitorReleaseHealth[] };
+    return body.data.find(row => row.release === release && row.environment === 'development') ?? null;
   };
 
   const recordEventTime = (browserRequest: Request) => {
@@ -78,8 +99,12 @@ test('a real browser error reopens a resolved Issue as a regression without assi
     const previewBody = await previewResponse.json() as {
       data: { id: number; previewToken: string; previewCountsJson: string };
     };
-    const previewCounts = JSON.parse(previewBody.data.previewCountsJson) as { error_event: number };
+    const previewCounts = JSON.parse(previewBody.data.previewCountsJson) as {
+      error_event: number;
+      behavior_event: number;
+    };
     expect(previewCounts.error_event).toBeGreaterThanOrEqual(eventTimes.length);
+    expect(previewCounts.behavior_event).toBeGreaterThan(0);
     const executeResponse = await request.post(
       `${serverUrl}/monitor/admin/demo-web/data-deletion/${previewBody.data.id}/execute`,
       { headers, data: { previewToken: previewBody.data.previewToken } }
@@ -128,8 +153,19 @@ test('a real browser error reopens a resolved Issue as a regression without assi
     expect(issue?.eventCount).toBeGreaterThanOrEqual(2);
     expect(issue?.regressedAt).toBeTruthy();
 
+    await expect.poll(async () => (await fetchReleaseHealth())?.unhandledErrors ?? 0,
+      { timeout: 60_000, intervals: [500, 1000, 2000] }).toBeGreaterThanOrEqual(2);
+    const health = await fetchReleaseHealth();
+    expect(health?.sessions).toBe(1);
+    expect(health?.crashedSessions).toBe(1);
+    expect(health?.crashFreeSessionsRate).toBe(0);
+    expect(health?.users).toBe(1);
+    expect(health?.crashedUsers).toBe(1);
+    expect(health?.crashFreeUsersRate).toBe(0);
+
     await deleteRunData();
     await expect.poll(async () => (await fetchIssue())?.id ?? null, { timeout: 30_000 }).toBeNull();
+    await expect.poll(async () => (await fetchReleaseHealth())?.sessions ?? 0, { timeout: 30_000 }).toBe(0);
     cleanupComplete = true;
   } finally {
     if (!cleanupComplete) await deleteRunData();

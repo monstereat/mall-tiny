@@ -37,6 +37,10 @@ jobs:
           pnpm install --frozen-lockfile
           pnpm build
 
+      - name: Test SDK core telemetry
+        working-directory: monitor/sdk
+        run: node --test packages/core/test/*.test.mjs
+
       - name: Build admin console
         working-directory: admin
         run: |

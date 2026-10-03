@@ -369,6 +369,18 @@ export interface MonitorRelease {
   deployTime?: string;
 }
 
+export interface MonitorReleaseHealth {
+  release: string;
+  environment: string;
+  sessions: number;
+  crashedSessions: number;
+  crashFreeSessionsRate: number;
+  users: number;
+  crashedUsers: number;
+  crashFreeUsersRate: number;
+  unhandledErrors: number;
+}
+
 export interface MonitorReplay {
   id: number;
   projectId: number;
@@ -685,6 +697,8 @@ export const monitorApi = {
   },
   releases: (projectKey: string) =>
     request<MonitorRelease[]>(projectUrl(projectKey, '/releases')),
+  releaseHealth: (projectKey: string, hours = 168) =>
+    request<MonitorReleaseHealth[]>(projectUrl(projectKey, `/release-health?hours=${hours}`)),
   replays: (projectKey: string, sessionId = '') =>
     request<MonitorReplay[]>(projectUrl(projectKey, `/replays?sessionId=${encodeURIComponent(sessionId)}`)),
   replay: (projectKey: string, replayId: number) =>

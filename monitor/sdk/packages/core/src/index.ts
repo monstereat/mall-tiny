@@ -7,6 +7,8 @@ export interface MonitorClientOptions {
   release?: string;
   environment?: string;
   sampleRate?: number;
+  /** Send session lifecycle markers for Release Health. Defaults to true. */
+  releaseHealth?: boolean;
   /** Opt-in probability for browser JavaScript CPU profiles. Defaults to 0. */
   profileSampleRate?: number;
   /** Duration of each CPU profile window in milliseconds. Defaults to 60000. */
@@ -104,7 +106,7 @@ function matchingTraceparent(value: string | undefined, traceId: string | undefi
 export class MonitorClient {
   private readonly queue: QueuedMonitorEvent[] = [];
   private readonly errorListeners = new Set<(input: MonitorEventInput) => void>();
-  private readonly sessionId: string;
+  private sessionId: string;
   private userId?: string;
   private timer?: ReturnType<typeof setInterval>;
   private retryTimer?: ReturnType<typeof setTimeout>;
@@ -121,6 +123,7 @@ export class MonitorClient {
     this.sessionId = options.sessionId ?? randomId();
     this.userId = options.userId;
     this.restoreQueue();
+    this.startReleaseHealthSession();
     this.startProfiler();
     this.startMemoryProfiler();
 
@@ -133,7 +136,15 @@ export class MonitorClient {
   }
 
   setUser(userId?: string): void {
+    if (this.closed || userId === this.userId) return;
+    if (this.options.releaseHealth === false) {
+      this.userId = userId;
+      return;
+    }
+    this.captureSessionLifecycle('end');
     this.userId = userId;
+    this.sessionId = randomId();
+    this.startReleaseHealthSession();
   }
 
   onError(listener: (input: MonitorEventInput) => void): () => void {
@@ -188,7 +199,9 @@ export class MonitorClient {
         name: error.name,
         message: error.message,
         stack: error.stack,
-        ...extra
+        ...extra,
+        mechanism: 'manual',
+        unhandled: false
       }
     });
   }
@@ -310,6 +323,8 @@ export class MonitorClient {
   }
 
   async close(): Promise<void> {
+    if (this.closed) return;
+    this.captureSessionLifecycle('end');
     this.closed = true;
     if (this.timer) {
       clearInterval(this.timer);
@@ -340,6 +355,20 @@ export class MonitorClient {
     this.queue.push(event);
     this.trimQueue();
     this.persistQueue();
+  }
+
+  private startReleaseHealthSession(): void {
+    if (this.options.releaseHealth === false || this.closed) return;
+    this.captureSessionLifecycle('start');
+    void this.flush().catch(() => undefined);
+  }
+
+  private captureSessionLifecycle(action: 'start' | 'end'): void {
+    if (this.options.releaseHealth === false) return;
+    this.capture({
+      eventType: 'BEHAVIOR',
+      data: { category: 'session', action }
+    }, undefined, true);
   }
 
   private startProfiler(): void {

@@ -124,7 +124,7 @@ onBeforeUnmount(() => { if (pollTimer) window.clearInterval(pollTimer); });
 
     <el-alert
       title="删除会清除原始事件、Replay 对象及其索引，并重算 Issue 与聚合数据。"
-      description="预览有效期为 30 分钟。用户范围最多覆盖 14 天；未指定用户时，时间范围最多覆盖 90 天。"
+      description="预览有效期为 30 分钟。用户范围最多覆盖 14 天，并包含该用户关联会话中的遥测及会话标记；未指定用户时，时间范围最多覆盖 90 天。"
       type="warning" :closable="false" show-icon class="notice"
     />
 
@@ -134,7 +134,7 @@ onBeforeUnmount(() => { if (pollTimer) window.clearInterval(pollTimer); });
         <div class="form-row">
           <el-form-item label="开始时间"><el-date-picker v-model="form.from" type="datetime" value-format="YYYY-MM-DDTHH:mm" placeholder="选择开始时间" /></el-form-item>
           <el-form-item label="结束时间"><el-date-picker v-model="form.to" type="datetime" value-format="YYYY-MM-DDTHH:mm" placeholder="选择结束时间" /></el-form-item>
-          <el-form-item label="用户 ID（可选）"><el-input v-model="form.userId" maxlength="128" placeholder="指定用户以精确删除" /></el-form-item>
+          <el-form-item label="用户 ID（可选）"><el-input v-model="form.userId" maxlength="128" placeholder="删除该用户及其关联会话" /></el-form-item>
         </div>
         <el-button type="primary" :loading="submitting" :disabled="!projects.currentKey || !form.from || !form.to" @click="createPreview">预览影响范围</el-button>
       </el-form>

@@ -46,6 +46,7 @@ public class MonitorAdminController {
     private final MonitorAlertSilenceService silenceService;
     private final MonitorAlertDeliveryService deliveryService;
     private final MonitorLogQueryService logQueryService;
+    private final MonitorReleaseHealthService releaseHealthService;
     private final MonitorSavedExploreQueryService savedExploreQueryService;
     private final MonitorAlertNotificationRouteService notificationRouteService;
 
@@ -395,6 +396,17 @@ public class MonitorAdminController {
     public CommonResult<List<MonitorRelease>> releases(@PathVariable String projectKey) {
         MonitorProject project = adminService.requireProject(projectKey);
         return CommonResult.success(queryService.releases(project.getId()));
+    }
+
+    @GetMapping("/{projectKey}/release-health")
+    public CommonResult<List<com.macro.mall.tiny.modules.monitor.dto.MonitorReleaseHealth>> releaseHealth(
+            @PathVariable String projectKey,
+            @RequestParam(defaultValue = "168") int hours) {
+        MonitorProject project = adminService.requireProject(projectKey);
+        if (hours < 1 || hours > 24 * 30) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "hours must be between 1 and 720");
+        }
+        return CommonResult.success(releaseHealthService.list(project.getProjectKey(), hours));
     }
 
     @GetMapping("/{projectKey}/replays")

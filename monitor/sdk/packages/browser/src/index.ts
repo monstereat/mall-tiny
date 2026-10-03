@@ -140,6 +140,8 @@ export function init(options: BrowserMonitorOptions): BrowserMonitor {
             name: event.error.name ?? 'Error',
             message: event.message,
             stack: event.error.stack,
+            mechanism: 'onerror',
+            unhandled: true,
             file: event.filename,
             line: event.lineno,
             column: event.colno,
@@ -158,6 +160,8 @@ export function init(options: BrowserMonitorOptions): BrowserMonitor {
           data: {
             name: 'ResourceError',
             message: 'resource load failed',
+            mechanism: 'resource',
+            unhandled: false,
             file: resource.src || resource.href || '',
             tagName: resource.tagName,
             breadcrumbs: breadcrumbSnapshot()
@@ -175,6 +179,8 @@ export function init(options: BrowserMonitorOptions): BrowserMonitor {
           name: reason instanceof Error ? reason.name : 'UnhandledRejection',
           message: reason instanceof Error ? reason.message : text(reason),
           stack: reason instanceof Error ? reason.stack : undefined,
+          mechanism: 'unhandledrejection',
+          unhandled: true,
           traceId: lastTraceId,
           breadcrumbs: breadcrumbSnapshot()
         }

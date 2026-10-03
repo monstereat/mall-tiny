@@ -386,32 +386,51 @@ public class MonitorDataDeletionService {
             String sql = "SELECT event_id, toJSONString(groupArray((bucket_epoch, fingerprint, event_count))) AS hourly_deltas FROM (" +
                     "SELECT event_id, toUnixTimestamp(toStartOfHour(event_time)) AS bucket_epoch, fingerprint, count() AS event_count " +
                     "FROM monitor.error_event WHERE project_id=? AND event_time>=? AND event_time<? AND received_at<=?" +
-                    (StringUtils.hasText(job.getUserId()) ? " AND user_id=?" : "") +
+                    (StringUtils.hasText(job.getUserId()) ? userScopedEventClause(true) : "") +
                     " AND event_id>? GROUP BY event_id, bucket_epoch, fingerprint) " +
                     "GROUP BY event_id ORDER BY event_id LIMIT " + BATCH_SIZE;
             List<Object> args = new ArrayList<>(List.of(job.getProjectKey(), new Timestamp(job.getRangeStart().getTime()), new Timestamp(job.getRangeEnd().getTime())));
             args.add(new Timestamp(job.getStartedAt().getTime()));
-            if (StringUtils.hasText(job.getUserId())) args.add(job.getUserId());
+            if (StringUtils.hasText(job.getUserId())) addUserScopedEventArgs(args, job, true);
             args.add(cursor);
             return clickHouse.queryForList(sql, args.toArray());
         }
         String sql = "SELECT event_id,fingerprint FROM monitor." + table + " WHERE project_id=? AND event_time>=? AND event_time<? AND received_at<=?" +
-                (StringUtils.hasText(job.getUserId()) ? " AND user_id=?" : "") + " AND event_id>? GROUP BY event_id,fingerprint ORDER BY event_id LIMIT " + BATCH_SIZE;
+                (StringUtils.hasText(job.getUserId()) ? userScopedEventClause(true) : "") +
+                " AND event_id>? GROUP BY event_id,fingerprint ORDER BY event_id LIMIT " + BATCH_SIZE;
         List<Object> args = new ArrayList<>(List.of(job.getProjectKey(), new Timestamp(job.getRangeStart().getTime()), new Timestamp(job.getRangeEnd().getTime())));
         args.add(new Timestamp(job.getStartedAt().getTime()));
-        if (StringUtils.hasText(job.getUserId())) args.add(job.getUserId());
+        if (StringUtils.hasText(job.getUserId())) addUserScopedEventArgs(args, job, true);
         args.add(cursor);
         return clickHouse.queryForList(sql, args.toArray());
     }
 
     private long countEvents(String table, String projectKey, Instant from, Instant to, String userId) {
         String sql = "SELECT uniqExact(event_id) FROM monitor." + table + " WHERE project_id=? AND event_time>=? AND event_time<?" +
-                (userId == null ? "" : " AND user_id=?");
+                (userId == null ? "" : userScopedEventClause(false));
         Object[] args = userId == null
                 ? new Object[]{projectKey, Timestamp.from(from), Timestamp.from(to)}
-                : new Object[]{projectKey, Timestamp.from(from), Timestamp.from(to), userId};
+                : new Object[]{projectKey, Timestamp.from(from), Timestamp.from(to), userId,
+                projectKey, Timestamp.from(from), Timestamp.from(to), userId};
         Long count = clickHouse.queryForObject(sql, Long.class, args);
         return count == null ? 0 : count;
+    }
+
+    private String userScopedEventClause(boolean snapshot) {
+        return " AND (user_id=? OR session_id IN (SELECT session_id FROM monitor.behavior_event " +
+                "WHERE project_id=? AND event_time>=? AND event_time<?" +
+                (snapshot ? " AND received_at<=?" : "") + " AND user_id=? " +
+                "AND JSONExtractString(payload,'data','category')='session' " +
+                "AND JSONExtractString(payload,'data','action')='start'))";
+    }
+
+    private void addUserScopedEventArgs(List<Object> args, MonitorDataDeletionJob job, boolean snapshot) {
+        args.add(job.getUserId());
+        args.add(job.getProjectKey());
+        args.add(new Timestamp(job.getRangeStart().getTime()));
+        args.add(new Timestamp(job.getRangeEnd().getTime()));
+        if (snapshot) args.add(new Timestamp(job.getStartedAt().getTime()));
+        args.add(job.getUserId());
     }
 
     private void saveItem(Long jobId, String type, String value) {
