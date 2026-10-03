@@ -93,7 +93,7 @@ monitor:
     sp-certificate-base64: ${MONITOR_SAML_SP_CERTIFICATE_BASE64:}
   ai:
     enabled: ${MONITOR_AI_ENABLED:false}
-    api-key: ${OPENAI_API_KEY:}
+    api-key: ${MONITOR_AI_API_KEY:${OPENAI_API_KEY:}}
     base-url: ${MONITOR_AI_BASE_URL:https://api.openai.com/v1}
     model: ${MONITOR_AI_MODEL:gpt-6-astra}
   ingest:

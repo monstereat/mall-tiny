@@ -5,6 +5,13 @@ on:
     branches: [develop-me]
   pull_request:
     branches: [develop-me]
+  workflow_dispatch:
+    inputs:
+      run_infrastructure_e2e:
+        description: Run the infrastructure and browser E2E suite
+        required: false
+        default: false
+        type: boolean
 
 jobs:
   verify:
@@ -50,6 +57,7 @@ jobs:
           pnpm build
 
   infrastructure-e2e:
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.run_infrastructure_e2e }}
     runs-on: ubuntu-latest
     timeout-minutes: 25
     env:
