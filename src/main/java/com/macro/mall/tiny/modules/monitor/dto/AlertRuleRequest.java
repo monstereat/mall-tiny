@@ -20,5 +20,6 @@ public class AlertRuleRequest {
     private Integer cooldownSeconds = 900;
     private String level = "warning";
     private String webhookUrl;
+    private Long notificationRouteId;
     private Integer enabled = 1;
 }

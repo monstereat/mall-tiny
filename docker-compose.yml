@@ -82,8 +82,10 @@ services:
     ports:
       - "8123:8123"
       - "9000:9000"
+      - "127.0.0.1:9363:9363"
     volumes:
       - monitor_clickhouse_data:/var/lib/clickhouse
+      - ./infra/clickhouse/config.d:/etc/clickhouse-server/config.d:ro
       - ./infra/clickhouse/init:/docker-entrypoint-initdb.d:ro
     ulimits:
       nofile:
@@ -125,10 +127,14 @@ services:
     image: prom/prometheus:v3.14.0
     container_name: monitor-prometheus
     restart: unless-stopped
+    depends_on:
+      alertmanager:
+        condition: service_healthy
     ports:
       - "9090:9090"
     volumes:
       - ./infra/prometheus/prometheus-local.yml:/etc/prometheus/prometheus.yml:ro
+      - ./infra/prometheus/rules:/etc/prometheus/rules:ro
       - monitor_prometheus_data:/prometheus
     extra_hosts:
       - "host.docker.internal:host-gateway"
@@ -136,6 +142,27 @@ services:
       - --config.file=/etc/prometheus/prometheus.yml
       - --storage.tsdb.path=/prometheus
       - --storage.tsdb.retention.time=15d
+
+  alertmanager:
+    labels: *monitor-service-labels
+    image: prom/alertmanager:v0.28.1
+    container_name: monitor-alertmanager
+    restart: unless-stopped
+    ports:
+      - "9093:9093"
+    volumes:
+      - ./infra/alertmanager/alertmanager.yml:/etc/alertmanager/alertmanager.yml:ro
+      - monitor_alertmanager_data:/alertmanager
+    command:
+      - --config.file=/etc/alertmanager/alertmanager.yml
+      - --storage.path=/alertmanager
+      - --web.external-url=http://localhost:9093/
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q --spider http://127.0.0.1:9093/-/healthy"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 10s
 
   jaeger:
     labels: *monitor-service-labels
@@ -185,6 +212,7 @@ volumes:
   monitor_clickhouse_data:
   monitor_object_store_data:
   monitor_prometheus_data:
+  monitor_alertmanager_data:
   monitor_jaeger_data:
 
 networks:

@@ -1,0 +1,15 @@
+global:
+  resolve_timeout: 1m
+
+route:
+  receiver: e2e-http
+  group_by: [alertname]
+  group_wait: 1s
+  group_interval: 1s
+  repeat_interval: 1h
+
+receivers:
+  - name: e2e-http
+    webhook_configs:
+      - url: http://e2e-alert-receiver:8080/webhook
+        send_resolved: true

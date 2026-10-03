@@ -72,8 +72,12 @@ public class SourceMapV3Resolver {
 
                         generatedColumnState += values[0];
 
-                        // A single-field segment has no original source mapping.
-                        if (values.length >= 4) {
+                        // A single-field segment marks an unmapped range. It must clear a prior
+                        // candidate so positions after this segment are not attributed to an
+                        // earlier generated range.
+                        if (lineIndex == targetLine && generatedColumnState <= targetColumn && values.length == 1) {
+                            candidate = null;
+                        } else if (values.length >= 4) {
                             sourceIndex += values[1];
                             originalLine += values[2];
                             originalColumn += values[3];

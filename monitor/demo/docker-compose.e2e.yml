@@ -2,9 +2,49 @@ x-monitor-service-labels: &monitor-service-labels
   com.monstereat.observability: "true"
 
 services:
+  server:
+    environment:
+      MONITOR_DATA_DELETION_LOKI_POLL_DELAY_MS: 30000
+
+  loki:
+    volumes:
+      - ./infra/loki/config-e2e.yml:/etc/loki/config.yml:ro
+
+  prometheus:
+    labels: *monitor-service-labels
+    depends_on:
+      alertmanager:
+        condition: service_healthy
+    volumes:
+      - ./monitor/demo/e2e/alertmanager/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./monitor/demo/e2e/alertmanager/rules.yml:/etc/prometheus/e2e-rules/alertmanager-notification.yml:ro
+
+  alertmanager:
+    labels: *monitor-service-labels
+    depends_on:
+      e2e-alert-receiver:
+        condition: service_healthy
+    volumes:
+      - ./monitor/demo/e2e/alertmanager/alertmanager.yml:/etc/alertmanager/alertmanager.yml:ro
+
+  e2e-alert-receiver:
+    image: python:3.12-alpine
+    labels: *monitor-service-labels
+    restart: unless-stopped
+    volumes:
+      - ./monitor/demo/e2e/alertmanager:/app:ro
+    command: ["python", "/app/receiver.py"]
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/healthz', timeout=2)"]
+      interval: 2s
+      timeout: 3s
+      retries: 20
+      start_period: 2s
+
   demo:
     image: nginx:1.29.4-alpine
     labels: *monitor-service-labels
+    restart: unless-stopped
     depends_on:
       - server
     ports:

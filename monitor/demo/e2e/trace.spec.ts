@@ -153,6 +153,152 @@ test('browser API probe, SDK batch, Kafka producer and consumer share one trace'
   }
 });
 
+test('browser fetch HTTP span reaches the trace span API with its parent context', async ({ page, request }) => {
+  const runId = `http-span-${Date.now()}-${Math.random().toString(16).slice(2, 8)}`;
+  const userId = `issue-regression-e2e-${runId}`;
+  const traceId = runId.replace(/[^0-9a-f]/gi, '').padEnd(32, 'a').slice(0, 32).toLowerCase();
+  const parentSpanId = Math.random().toString(16).slice(2).padEnd(16, 'b').slice(0, 16).toLowerCase();
+  const release = `e2e-${runId}`;
+  const authResponse = await request.post('http://localhost:8080/admin/login', {
+    data: { username: 'admin', password: 'macro123' }
+  });
+  expect(authResponse.ok()).toBeTruthy();
+  const authBody = await authResponse.json() as { data: { token: string } };
+  const headers = { Authorization: `Bearer ${authBody.data.token}` };
+  const spansUrl = `http://localhost:8080/monitor/admin/demo-web/traces/${traceId}/spans`;
+  let batchAccepted = false;
+  let spanStartTime = Date.now();
+  let spanEventTime = spanStartTime;
+  let spanId = '';
+  let cleanupDiagnostics: Record<string, unknown> = { phase: 'not-started' };
+
+  const deleteRunData = async () => {
+    if (!batchAccepted) return;
+    cleanupDiagnostics = { phase: 'wait-for-span-persistence', runId, userId, traceId, spanId, spanEventTime };
+    try {
+      await expect.poll(() => Date.now(), { timeout: 20_000, intervals: [500, 1000, 2000] })
+        .toBeGreaterThan(spanEventTime + 10_000);
+      const rangeEnd = new Date(Date.now() - 2_000).toISOString();
+      cleanupDiagnostics = { ...cleanupDiagnostics, phase: 'preview', rangeEnd };
+      const previewResponse = await request.post('http://localhost:8080/monitor/admin/demo-web/data-deletion/preview', {
+        headers,
+        data: {
+          from: new Date(spanEventTime - 60_000).toISOString(),
+          to: rangeEnd,
+          userId
+        }
+      });
+      const previewText = await previewResponse.text();
+      cleanupDiagnostics = { ...cleanupDiagnostics, previewStatus: previewResponse.status(), previewBody: previewText };
+      expect(previewResponse.ok(), 'user-scoped telemetry cleanup preview is available').toBeTruthy();
+      const previewBody = JSON.parse(previewText) as {
+        data: { id: number; previewToken: string; previewCountsJson?: string };
+      };
+      cleanupDiagnostics = {
+        ...cleanupDiagnostics,
+        phase: 'execute',
+        deletionJobId: previewBody.data.id,
+        previewCountsJson: previewBody.data.previewCountsJson
+      };
+      const executeResponse = await request.post(
+        `http://localhost:8080/monitor/admin/demo-web/data-deletion/${previewBody.data.id}/execute`,
+        { headers, data: { previewToken: previewBody.data.previewToken } }
+      );
+      cleanupDiagnostics = { ...cleanupDiagnostics, executeStatus: executeResponse.status() };
+      expect(executeResponse.ok(), 'user-scoped telemetry cleanup starts').toBeTruthy();
+      await expect.poll(async () => {
+        const [spansResponse, jobResponse] = await Promise.all([
+          request.get(spansUrl, { headers }),
+          request.get(`http://localhost:8080/monitor/admin/demo-web/data-deletion/${previewBody.data.id}`, { headers })
+        ]);
+        if (!spansResponse.ok() || !jobResponse.ok()) return false;
+        const spansBody = await spansResponse.json() as { data: Array<Record<string, unknown>> };
+        const jobBody = await jobResponse.json() as {
+          data: { status: string; stage?: string; errorMessage?: string };
+        };
+        cleanupDiagnostics = {
+          ...cleanupDiagnostics,
+          phase: 'wait-for-clickhouse-cleanup',
+          deletionStatus: jobBody.data.status,
+          deletionStage: jobBody.data.stage,
+          deletionError: jobBody.data.errorMessage
+        };
+        return jobBody.data.status !== 'FAILED'
+          && !spansBody.data.some(span => String(span.spanId).toLowerCase() === spanId);
+      }, { timeout: 90_000, intervals: [1000, 2000, 5000] }).toBe(true);
+      cleanupDiagnostics = { ...cleanupDiagnostics, phase: 'complete' };
+    } catch (error) {
+      cleanupDiagnostics = { ...cleanupDiagnostics, failure: error instanceof Error ? error.message : String(error) };
+      await test.info().attach('browser-http-span-cleanup-diagnostics.json', {
+        body: JSON.stringify(cleanupDiagnostics, null, 2),
+        contentType: 'application/json'
+      });
+      throw error;
+    }
+  };
+
+  try {
+    await page.goto(`/?issueRegression=${encodeURIComponent(runId)}&release=${encodeURIComponent(release)}`);
+    const parentTraceparent = `00-${traceId}-${parentSpanId}-01`;
+    const spanBatchRequest = page.waitForRequest(candidate => {
+      if (candidate.url() !== batchUrl || candidate.method() !== 'POST') return false;
+      try {
+        const body = candidate.postDataJSON() as { events?: Array<Record<string, unknown>> };
+        return body.events?.some(event => {
+          const data = event.data as Record<string, unknown> | undefined;
+          return event.eventType === 'SPAN'
+            && String(event.traceId).toLowerCase() === traceId
+            && String(data?.description).includes('/admin/info');
+        }) ?? false;
+      } catch {
+        return false;
+      }
+    });
+    const fetchResponse = await page.evaluate(async ({ url, traceparent }) => {
+      const response = await fetch(url, { headers: { traceparent } });
+      return { status: response.status };
+    }, { url: apiUrl, traceparent: parentTraceparent });
+    expect(fetchResponse.status).toBe(200);
+
+    const batchRequest = await spanBatchRequest;
+    const batchResponse = await batchRequest.response();
+    expect(batchResponse, 'span batch receives an ingest response').not.toBeNull();
+    batchAccepted = batchResponse!.ok();
+    expect(batchAccepted, `backend accepts the Browser SPAN event (HTTP ${batchResponse!.status()})`).toBeTruthy();
+
+    const batchBody = batchRequest.postDataJSON() as { events: Array<Record<string, unknown>> };
+    const spanEvent = batchBody.events.find(event => {
+      const data = event.data as Record<string, unknown> | undefined;
+      return event.eventType === 'SPAN'
+        && String(event.traceId).toLowerCase() === traceId
+        && String(data?.description).includes('/admin/info');
+    });
+    expect(spanEvent, 'Browser SDK emits an HTTP SPAN into the ingest batch').toBeTruthy();
+    const spanData = spanEvent!.data as Record<string, unknown>;
+    spanStartTime = Number(spanData.startTime) || Date.now();
+    spanEventTime = spanStartTime + (Number(spanData.durationMs) || 0);
+    spanId = String(spanData.spanId ?? '').toLowerCase();
+    expect(spanId).toMatch(/^[0-9a-f]{16}$/);
+    expect(spanId).not.toBe(parentSpanId);
+    expect(String(spanEvent!.traceId).toLowerCase()).toBe(traceId);
+    expect(String(spanData.parentSpanId).toLowerCase()).toBe(parentSpanId);
+    expect(String(spanData.op)).toMatch(/^http\./);
+
+    let storedSpan: Record<string, unknown> | undefined;
+    await expect.poll(async () => {
+      const response = await request.get(spansUrl, { headers });
+      if (!response.ok()) return false;
+      const body = await response.json() as { data: Array<Record<string, unknown>> };
+      storedSpan = body.data.find(span => String(span.spanId).toLowerCase() === spanId);
+      return Boolean(storedSpan);
+    }, { timeout: 60_000, intervals: [500, 1000, 2000] }).toBe(true);
+    expect(String(storedSpan!.traceId).toLowerCase()).toBe(traceId);
+    expect(String(storedSpan!.parentSpanId).toLowerCase()).toBe(parentSpanId);
+  } finally {
+    await deleteRunData();
+  }
+});
+
 test('opted-in unsampled session uploads pre-error Replay context on error', async ({ page }) => {
   const batches: Array<Array<Record<string, unknown>>> = [];
   page.on('request', request => {

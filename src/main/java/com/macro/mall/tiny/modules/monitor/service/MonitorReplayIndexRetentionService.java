@@ -10,6 +10,8 @@ import org.springframework.stereotype.Service;
 import java.time.Instant;
 import java.time.temporal.ChronoUnit;
 import java.util.Date;
+import java.util.List;
+import java.util.Map;
 
 @Service
 @Profile("prod")
@@ -17,6 +19,10 @@ import java.util.Date;
 public class MonitorReplayIndexRetentionService {
 
     private final MonitorReplayMapper replayMapper;
+    private final MonitorReplayQuotaService quotaService;
+
+    @Value("${monitor.minio.replay-bucket:monitor-replays}")
+    private String replayBucket;
 
     @Value("${monitor.minio.replay-retention-days:30}")
     private int retentionDays;
@@ -28,11 +34,11 @@ public class MonitorReplayIndexRetentionService {
     private int maxBatchesPerRun;
 
     @Scheduled(cron = "${monitor.minio.replay-index-cleanup-cron:0 15 * * * *}")
-    public void cleanupExpiredIndexes() {
+    public void cleanupExpiredIndexes() throws Exception {
         cleanupExpiredIndexes(Instant.now());
     }
 
-    int cleanupExpiredIndexes(Instant now) {
+    int cleanupExpiredIndexes(Instant now) throws Exception {
         if (retentionDays <= 0 || batchSize <= 0 || maxBatchesPerRun <= 0) {
             throw new IllegalStateException("Replay index retention and cleanup limits must be positive");
         }
@@ -40,9 +46,18 @@ public class MonitorReplayIndexRetentionService {
         Date cutoff = Date.from(now.minus(retentionDays, ChronoUnit.DAYS));
         int deleted = 0;
         for (int batch = 0; batch < maxBatchesPerRun; batch++) {
-            int batchDeleted = replayMapper.deleteExpiredBatch(cutoff, batchSize);
-            deleted += batchDeleted;
-            if (batchDeleted < batchSize) {
+            List<Map<String, Object>> expired = replayMapper.selectExpiredBatch(cutoff, batchSize);
+            for (Map<String, Object> replay : expired) {
+                String projectKey = (String) replay.get("projectKey");
+                String objectKey = (String) replay.get("objectKey");
+                if (projectKey == null || objectKey == null) {
+                    throw new IllegalStateException("Expired replay is missing its project or object key");
+                }
+
+                quotaService.removeObject(replayBucket, projectKey, objectKey);
+                deleted += replayMapper.deleteById(((Number) replay.get("id")).longValue());
+            }
+            if (expired.size() < batchSize) {
                 break;
             }
         }

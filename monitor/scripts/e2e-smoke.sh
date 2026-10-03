@@ -4,18 +4,29 @@ set -euo pipefail
 compose_file="${COMPOSE_FILE:-docker-compose.deploy.yml}"
 base_url="${MONITOR_BASE_URL:-http://localhost:8080}"
 health_url="${MONITOR_HEALTH_URL:-http://localhost:8081/actuator/health}"
-minio_health_url="${MINIO_HEALTH_URL:-http://localhost:9002/minio/health/ready}"
+minio_health_url="${MINIO_HEALTH_URL:-}"
 jaeger_query_url="${JAEGER_QUERY_URL:-http://localhost:16686}"
 ingest_key="${MONITOR_INGEST_KEY:-dev-monitor-key}"
-clickhouse_password="${CLICKHOUSE_PASSWORD:-monitor}"
+clickhouse_password="${CLICKHOUSE_PASSWORD:-}"
 admin_user="${MONITOR_ADMIN_USER:-admin}"
 admin_password="${MONITOR_ADMIN_PASSWORD:-macro123}"
 run_id="${GITHUB_RUN_ID:-local}-$(date +%s)-$$"
 alert_rule_id=""
+alert_rule_name=""
+alert_rule_metric=""
+alert_rule_threshold=0
+alert_rule_window=60
+alert_rule_duration=0
+alert_rule_cooldown=0
+alert_rule_level="critical"
 
 compose() {
   docker compose -f "$compose_file" "$@"
 }
+
+if [[ -z "$clickhouse_password" ]]; then
+  clickhouse_password="$(compose config --format json | jq -er '.services.clickhouse.environment.CLICKHOUSE_PASSWORD')"
+fi
 
 wait_for_server() {
   local attempt
@@ -33,7 +44,11 @@ wait_for_server() {
 wait_for_minio() {
   local attempt
   for attempt in $(seq 1 120); do
-    if curl --silent --fail "$minio_health_url" >/dev/null; then
+    if [[ -n "$minio_health_url" ]]; then
+      if curl --silent --fail "$minio_health_url" >/dev/null; then
+        return 0
+      fi
+    elif compose exec -T minio curl --fail --silent http://127.0.0.1:9000/health/ready >/dev/null 2>&1; then
       return 0
     fi
     sleep 2
@@ -153,7 +168,7 @@ wait_for_trace_parent_chain() {
 wait_for_alert_status() {
   local rule_id="$1"
   local expected_status="$2"
-  local timeout_seconds=30
+  local timeout_seconds=90
   local deadline=$(( $(date +%s) + timeout_seconds ))
   local records
 
@@ -181,12 +196,16 @@ disable_alert_rule() {
     -X PUT \
     -H 'Content-Type: application/json' \
     -H "Authorization: Bearer $token" \
-    --data "{\"name\":\"e2e-lcp-alert-$run_id\",\"metric\":\"LCP\",\"operator\":\">\",\"thresholdValue\":1000,\"windowSeconds\":60,\"durationSeconds\":0,\"cooldownSeconds\":0,\"level\":\"critical\",\"enabled\":0}" \
+    --data "{\"name\":\"$alert_rule_name\",\"metric\":\"$alert_rule_metric\",\"operator\":\">\",\"thresholdValue\":$alert_rule_threshold,\"windowSeconds\":$alert_rule_window,\"durationSeconds\":$alert_rule_duration,\"cooldownSeconds\":$alert_rule_cooldown,\"level\":\"$alert_rule_level\",\"enabled\":0}" \
     "$base_url/monitor/admin/demo-web/alerts/rules/$alert_rule_id" >/dev/null
 }
 
 wait_for_server
 wait_for_minio
+
+if compose config --services | grep -qx e2e-alert-receiver; then
+  compose exec -T e2e-alert-receiver python /app/verify.py
+fi
 
 error_id="e2e-error-$run_id"
 performance_id="e2e-performance-$run_id"
@@ -213,6 +232,33 @@ token=$(curl --silent --show-error --fail-with-body \
   "$base_url/admin/login" | jq -er '.data.token')
 trap disable_alert_rule EXIT
 
+alert_rule_name="e2e-api-failure-alert-$run_id"
+alert_rule_metric="api_failure_count"
+alert_rule_threshold=0
+alert_rule_window=60
+alert_rule_duration=0
+alert_rule_cooldown=0
+alert_rule=$(curl --silent --show-error --fail-with-body \
+  -H 'Content-Type: application/json' \
+  -H "Authorization: Bearer $token" \
+  --data "{\"name\":\"$alert_rule_name\",\"metric\":\"$alert_rule_metric\",\"operator\":\">\",\"thresholdValue\":$alert_rule_threshold,\"windowSeconds\":$alert_rule_window,\"durationSeconds\":$alert_rule_duration,\"cooldownSeconds\":$alert_rule_cooldown,\"level\":\"$alert_rule_level\",\"enabled\":1}" \
+  "$base_url/monitor/admin/demo-web/alerts/rules")
+alert_rule_id=$(jq -er '.data.id' <<<"$alert_rule")
+
+api_failure_id="e2e-api-failure-$run_id"
+send_event "$api_failure_id" BEHAVIOR '{"category":"api","url":"/e2e/failure","method":"GET","status":503,"duration":12}'
+wait_for_event behavior_event "$api_failure_id"
+wait_for_alert_status "$alert_rule_id" firing
+wait_for_alert_status "$alert_rule_id" resolved
+disable_alert_rule
+alert_rule_id=""
+
+alert_rule_name="e2e-lcp-alert-$run_id"
+alert_rule_metric="LCP"
+alert_rule_threshold=1000
+alert_rule_window=60
+alert_rule_duration=0
+alert_rule_cooldown=0
 alert_rule=$(curl --silent --show-error --fail-with-body \
   -H 'Content-Type: application/json' \
   -H "Authorization: Bearer $token" \
@@ -251,4 +297,4 @@ jq -e '.data | length > 0' <<<"$replays" >/dev/null
 
 disable_alert_rule
 alert_rule_id=""
-echo "Infrastructure and LCP alert E2E smoke passed for run $run_id (alert rule disabled; alert records retained)"
+echo "Infrastructure, API failure, and LCP alert E2E smoke passed for run $run_id (alert rules disabled; alert records retained)"

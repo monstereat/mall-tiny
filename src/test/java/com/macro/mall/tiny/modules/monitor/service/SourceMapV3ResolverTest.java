@@ -57,4 +57,23 @@ class SourceMapV3ResolverTest {
                 1
         ).isEmpty());
     }
+
+    @Test
+    void shouldReturnEmptyInsideUnmappedRangeAfterMappedSegment() {
+        String sourceMap = """
+                {
+                  "version": 3,
+                  "sources": ["src/app.ts"],
+                  "names": [],
+                  "mappings": "AAAA,K",
+                  "sourcesContent": ["const a = 1;"]
+                }
+                """;
+
+        assertTrue(resolver.resolve(
+                sourceMap.getBytes(StandardCharsets.UTF_8),
+                1,
+                6
+        ).isEmpty());
+    }
 }
