@@ -110,6 +110,24 @@ jobs:
           echo 'Server did not become healthy within 120 seconds.' >&2
           exit 1
 
+      - name: Run sustained 75 req/s ingestion load for 5 minutes
+        run: docker compose -p "$COMPOSE_PROJECT_NAME" -f docker-compose.deploy.yml -f monitor/demo/docker-compose.e2e.yml --profile load run --rm --no-deps k6 run /scripts/ingest-load.js
+
+      - name: Verify sustained ingestion reached ClickHouse
+        run: |
+          set -euo pipefail
+          compose=(docker compose -p "$COMPOSE_PROJECT_NAME" -f docker-compose.deploy.yml -f monitor/demo/docker-compose.e2e.yml)
+          for attempt in $(seq 1 180); do
+            count="$("${compose[@]}" exec -T clickhouse clickhouse-client --user default --password "$CLICKHOUSE_PASSWORD" --query "SELECT count() FROM monitor.performance_event WHERE event_id LIKE 'load-%' AND release = 'load-test' AND environment = 'load-test'")"
+            if [[ "$count" -ge 22500 ]]; then
+              echo "ClickHouse persisted all $count sustained-load events."
+              exit 0
+            fi
+            sleep 1
+          done
+          echo "Expected at least 22500 load events in ClickHouse; found $count." >&2
+          exit 1
+
       - name: Verify Alertmanager firing and recovery delivery
         run: docker compose -p "$COMPOSE_PROJECT_NAME" -f docker-compose.deploy.yml -f monitor/demo/docker-compose.e2e.yml exec -T e2e-alert-receiver python /app/verify.py
 
