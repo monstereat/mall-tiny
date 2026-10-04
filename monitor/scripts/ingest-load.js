@@ -14,13 +14,15 @@ export const options = {
       rate,
       timeUnit: '1s',
       duration,
-      preAllocatedVUs: Math.max(10, Math.ceil(rate / 2)),
+      preAllocatedVUs: Math.max(10, rate),
       maxVUs: Math.max(50, rate * 2)
     },
   },
   thresholds: {
     http_req_failed: ['rate<0.01'],
     http_req_duration: ['p(95)<500'],
+    checks: ['rate==1'],
+    dropped_iterations: ['count==0'],
   },
 };
 

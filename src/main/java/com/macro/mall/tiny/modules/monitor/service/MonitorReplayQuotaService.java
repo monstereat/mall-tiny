@@ -1,5 +1,9 @@
 package com.macro.mall.tiny.modules.monitor.service;
 
+import io.micrometer.core.instrument.DistributionSummary;
+import io.micrometer.core.instrument.MeterRegistry;
+import io.micrometer.core.instrument.Metrics;
+import io.micrometer.core.instrument.Timer;
 import io.minio.ListObjectsArgs;
 import io.minio.MinioClient;
 import io.minio.RemoveObjectArgs;
@@ -8,6 +12,7 @@ import io.minio.Result;
 import io.minio.StatObjectResponse;
 import io.minio.messages.Item;
 import lombok.RequiredArgsConstructor;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Service;
@@ -30,6 +35,13 @@ import java.util.concurrent.locks.ReentrantLock;
 public class MonitorReplayQuotaService {
 
     private static final int PROJECT_LOCK_COUNT = 64;
+    private static final int OBJECT_LIST_PAGE_SIZE = 1_000;
+    private static final String OBJECT_SCAN_TIMER = "monitor.replay.quota.object.scan";
+    private static final String OBJECT_SCAN_OBJECTS = "monitor.replay.quota.object.scan.objects";
+    private static final String OBJECT_SCAN_BYTES = "monitor.replay.quota.object.scan.bytes";
+    private static final String OBJECT_SCAN_ESTIMATED_PAGES = "monitor.replay.quota.object.scan.estimated_pages";
+    private static final String LOCAL_PROJECT_LOCK_WAIT_TIMER = "monitor.replay.quota.local.lock.wait";
+    private static final String PROJECT_LOCK_WAIT_TIMER = "monitor.replay.quota.lock.wait";
     private static final String ACQUIRE_PROJECT_LOCK_SQL = "SELECT GET_LOCK(?, ?)";
     private static final String RELEASE_PROJECT_LOCK_SQL = "SELECT RELEASE_LOCK(?)";
     private static final String SELECT_USAGE_SQL = "SELECT used_bytes FROM monitor_replay_storage_usage " +
@@ -47,12 +59,20 @@ public class MonitorReplayQuotaService {
     private final MinioClient minioClient;
     private final DataSource dataSource;
     private final ReentrantLock[] projectLocks = createProjectLocks();
+    private volatile MeterRegistry meterRegistry = Metrics.globalRegistry;
 
     @Value("${monitor.minio.replay-project-quota-bytes:10737418240}")
     private long projectQuotaBytes;
 
     @Value("${monitor.minio.replay-quota-lock-wait-seconds:30}")
     private int projectLockWaitSeconds;
+
+    @Autowired(required = false)
+    public void setMeterRegistry(MeterRegistry meterRegistry) {
+        if (meterRegistry != null) {
+            this.meterRegistry = meterRegistry;
+        }
+    }
 
     public <T> T storeIfWithinQuota(String bucket, String projectKey, long incomingBytes,
                                     QuotaAction<T> action) throws Exception {
@@ -65,7 +85,7 @@ public class MonitorReplayQuotaService {
 
         ReentrantLock lock = projectLocks[Math.floorMod(31 * bucket.hashCode() + projectKey.hashCode(),
                 projectLocks.length)];
-        lock.lock();
+        acquireLocalProjectLock(lock);
         try {
             return withDatabaseProjectLock(bucket, projectKey, connection -> {
                 long currentBytes = getOrInitializeUsage(connection, bucket, projectKey);
@@ -94,7 +114,7 @@ public class MonitorReplayQuotaService {
     public void removeObject(String bucket, String projectKey, String objectKey) throws Exception {
         ReentrantLock lock = projectLocks[Math.floorMod(31 * bucket.hashCode() + projectKey.hashCode(),
                 projectLocks.length)];
-        lock.lock();
+        acquireLocalProjectLock(lock);
         try {
             withDatabaseProjectLock(bucket, projectKey, connection -> {
                 getOrInitializeUsage(connection, bucket, projectKey);
@@ -137,7 +157,7 @@ public class MonitorReplayQuotaService {
     private void reconcileProject(String bucket, String projectKey) throws Exception {
         ReentrantLock lock = projectLocks[Math.floorMod(31 * bucket.hashCode() + projectKey.hashCode(),
                 projectLocks.length)];
-        lock.lock();
+        acquireLocalProjectLock(lock);
         try {
             withDatabaseProjectLock(bucket, projectKey, connection -> {
                 setUsage(connection, bucket, projectKey, getProjectObjectBytes(bucket, projectKey));
@@ -219,14 +239,28 @@ public class MonitorReplayQuotaService {
     }
 
     private void acquireProjectLock(Connection connection, String lockName) throws SQLException {
-        try (PreparedStatement statement = connection.prepareStatement(ACQUIRE_PROJECT_LOCK_SQL)) {
-            statement.setString(1, lockName);
-            statement.setInt(2, projectLockWaitSeconds);
-            try (ResultSet result = statement.executeQuery()) {
-                if (!result.next() || result.getInt(1) != 1 || result.wasNull()) {
-                    throw new IllegalStateException("Replay project quota lock acquisition timed out: " + lockName);
+        Timer.Sample sample = Timer.start(meterRegistry);
+        try {
+            try (PreparedStatement statement = connection.prepareStatement(ACQUIRE_PROJECT_LOCK_SQL)) {
+                statement.setString(1, lockName);
+                statement.setInt(2, projectLockWaitSeconds);
+                try (ResultSet result = statement.executeQuery()) {
+                    if (!result.next() || result.getInt(1) != 1 || result.wasNull()) {
+                        throw new IllegalStateException("Replay project quota lock acquisition timed out: " + lockName);
+                    }
                 }
             }
+        } finally {
+            sample.stop(meterRegistry.timer(PROJECT_LOCK_WAIT_TIMER));
+        }
+    }
+
+    private void acquireLocalProjectLock(ReentrantLock lock) {
+        Timer.Sample sample = Timer.start(meterRegistry);
+        try {
+            lock.lock();
+        } finally {
+            sample.stop(meterRegistry.timer(LOCAL_PROJECT_LOCK_WAIT_TIMER));
         }
     }
 
@@ -269,25 +303,45 @@ public class MonitorReplayQuotaService {
 
     long getProjectObjectBytes(String bucket, String projectKey) {
         long totalBytes = 0;
-        Iterable<Result<Item>> objects = minioClient.listObjects(
-                ListObjectsArgs.builder()
-                        .bucket(bucket)
-                        .prefix(projectKey + "/")
-                        .recursive(true)
-                        .build()
-        );
+        long objectCount = 0;
+        long estimatedPageCount = 1;
+        boolean completed = false;
+        Timer.Sample sample = Timer.start(meterRegistry);
         try {
+            Iterable<Result<Item>> objects = minioClient.listObjects(
+                    ListObjectsArgs.builder()
+                            .bucket(bucket)
+                            .prefix(projectKey + "/")
+                            .recursive(true)
+                            .maxKeys(OBJECT_LIST_PAGE_SIZE)
+                            .build()
+            );
             for (Result<Item> object : objects) {
                 long size = object.get().size();
-                if (size > Long.MAX_VALUE - totalBytes) {
-                    return Long.MAX_VALUE;
+                if (objectCount < Long.MAX_VALUE) {
+                    objectCount++;
                 }
-                totalBytes += size;
+                if (size > Long.MAX_VALUE - totalBytes) {
+                    totalBytes = Long.MAX_VALUE;
+                } else {
+                    totalBytes += size;
+                }
             }
+            estimatedPageCount = Math.max(1, objectCount / OBJECT_LIST_PAGE_SIZE
+                    + (objectCount % OBJECT_LIST_PAGE_SIZE == 0 ? 0 : 1));
+            completed = true;
+            return totalBytes;
         } catch (Exception e) {
             throw new IllegalStateException("Replay project quota lookup failed: " + projectKey, e);
+        } finally {
+            MeterRegistry registry = meterRegistry;
+            if (completed) {
+                DistributionSummary.builder(OBJECT_SCAN_OBJECTS).register(registry).record(objectCount);
+                DistributionSummary.builder(OBJECT_SCAN_BYTES).register(registry).record(totalBytes);
+                DistributionSummary.builder(OBJECT_SCAN_ESTIMATED_PAGES).register(registry).record(estimatedPageCount);
+            }
+            sample.stop(registry.timer(OBJECT_SCAN_TIMER));
         }
-        return totalBytes;
     }
 
     static boolean isWithinQuota(long currentBytes, long incomingBytes, long quotaBytes) {

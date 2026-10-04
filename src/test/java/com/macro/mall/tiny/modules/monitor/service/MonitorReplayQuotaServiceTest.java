@@ -4,6 +4,9 @@ import io.minio.ListObjectsArgs;
 import io.minio.MinioClient;
 import io.minio.Result;
 import io.minio.messages.Item;
+import io.micrometer.core.instrument.DistributionSummary;
+import io.micrometer.core.instrument.Timer;
+import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.springframework.test.util.ReflectionTestUtils;
@@ -52,9 +55,11 @@ class MonitorReplayQuotaServiceTest {
     private final ResultSet releaseResult = mock(ResultSet.class);
     private final ResultSet usageResult = mock(ResultSet.class);
     private final MonitorReplayQuotaService service = new MonitorReplayQuotaService(minioClient, dataSource);
+    private final SimpleMeterRegistry meterRegistry = new SimpleMeterRegistry();
 
     @BeforeEach
     void setUpLockMocks() throws Exception {
+        service.setMeterRegistry(meterRegistry);
         ReflectionTestUtils.setField(service, "projectLockWaitSeconds", 30);
         when(dataSource.getConnection()).thenReturn(connection);
         when(connection.prepareStatement(org.mockito.ArgumentMatchers.anyString())).thenAnswer(invocation -> {
@@ -77,6 +82,76 @@ class MonitorReplayQuotaServiceTest {
         when(releaseResult.getInt(1)).thenReturn(1);
         when(releaseResult.wasNull()).thenReturn(false);
         when(usageResult.next()).thenReturn(false);
+    }
+
+    @Test
+    void recordsObjectBytesAndEstimatedPagesForACompleteFullScan() throws Exception {
+        Item object = mock(Item.class);
+        when(object.size()).thenReturn(2L);
+        List<Result<Item>> objects = new java.util.ArrayList<>();
+        for (int i = 0; i < 1_001; i++) {
+            objects.add(new Result<>(object));
+        }
+        when(minioClient.listObjects(any(ListObjectsArgs.class))).thenReturn(objects);
+
+        assertEquals(2_002L, service.getProjectObjectBytes("monitor-replays", "project-a"));
+
+        assertEquals(1_001D, meterRegistry.find("monitor.replay.quota.object.scan.objects").summary().totalAmount());
+        assertEquals(2_002D, meterRegistry.find("monitor.replay.quota.object.scan.bytes").summary().totalAmount());
+        DistributionSummary estimatedPages = meterRegistry
+                .find("monitor.replay.quota.object.scan.estimated_pages").summary();
+        assertEquals(2D, estimatedPages.totalAmount());
+        assertEquals(1L, meterRegistry.find("monitor.replay.quota.object.scan").timer().count());
+
+        org.mockito.ArgumentCaptor<ListObjectsArgs> args =
+                org.mockito.ArgumentCaptor.forClass(ListObjectsArgs.class);
+        verify(minioClient).listObjects(args.capture());
+        assertEquals(1_000, args.getValue().maxKeys());
+        assertTrue(args.getValue().recursive());
+        assertTrue(meterRegistry.find("monitor.replay.quota.object.scan.estimated_pages").meter().getId()
+                .getTags().isEmpty());
+    }
+
+    @Test
+    void timesBothLocalAndDatabaseLockWaitWithoutDynamicTags() throws Exception {
+        setQuota(100L);
+        mockProjectObjects(80L);
+        when(lockStatement.executeQuery()).thenAnswer(invocation -> {
+            try {
+                Thread.sleep(60);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                throw new SQLException("interrupted while simulating lock wait", e);
+            }
+            return lockResult;
+        });
+
+        service.storeIfWithinQuota("monitor-replays", "project-a", 1L, () -> "stored");
+
+        Timer databaseLockWait = meterRegistry.find("monitor.replay.quota.lock.wait").timer();
+        Timer localLockWait = meterRegistry.find("monitor.replay.quota.local.lock.wait").timer();
+        assertEquals(1L, databaseLockWait.count());
+        assertTrue(databaseLockWait.totalTime(TimeUnit.MILLISECONDS) >= 30D);
+        assertEquals(1L, localLockWait.count());
+        assertTrue(databaseLockWait.getId().getTags().isEmpty());
+        assertTrue(localLockWait.getId().getTags().isEmpty());
+    }
+
+    @Test
+    void failedObjectScanRecordsElapsedTimeAndDoesNotWritePartialUsage() throws Exception {
+        setQuota(100L);
+        Item object = mock(Item.class);
+        when(object.size()).thenReturn(80L);
+        Result<Item> failedResult = new Result<>(new IllegalStateException("synthetic page failure"));
+        when(minioClient.listObjects(any(ListObjectsArgs.class)))
+                .thenReturn(List.of(new Result<>(object), failedResult));
+
+        assertThrows(IllegalStateException.class,
+                () -> service.storeIfWithinQuota("monitor-replays", "project-a", 1L, () -> "stored"));
+
+        assertEquals(1L, meterRegistry.find("monitor.replay.quota.object.scan").timer().count());
+        assertTrue(meterRegistry.find("monitor.replay.quota.object.scan.objects").summary() == null);
+        verify(usageInsertStatement, org.mockito.Mockito.never()).executeUpdate();
     }
 
     @Test
