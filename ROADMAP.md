@@ -2,7 +2,7 @@
 
 > 本文件是项目进度的唯一事实源。方案设计见根目录《企业级前端可观测监控平台_SpringBoot项目实施总纲.md》，阶段完成记录见 `docs/企业级前端可观测监控平台_完成状态与后续计划.md`。
 >
-> 当前进度快照：2026-10-04。完成状态文档记录的代码基线为 `830c740eec0505d0445c271d3ac04b203303856c`；Draft PR #1 运行时代码 head 为 `7bc9075`，`develop-me` 基线为 `62fb8b5`。PR head 之后的 Replay 配额扫描观测和 k6 压测门槛修正尚待推送及 CI 验收。
+> 当前进度快照：2026-10-04。完成状态文档记录的代码基线为 `830c740eec0505d0445c271d3ac04b203303856c`；Draft PR #1 head 为 `391223a`，`develop-me` 基线为 `62fb8b5`。进一步提高 k6 预分配 VU 的修正尚待推送及 CI 验收。
 
 ## 当前阶段
 
@@ -10,7 +10,7 @@
 
 **产品目标：优先补齐 Sentry 企业付费版的核心产品能力：跨信号查询、快速 Issue 定位与解决、组织安全治理、统一监控告警、核心可观测信号及 AI 辅助排查。Issue 流程以查看证据后尽快解决为主，不建设强制负责人分配；广泛 SDK/集成覆盖和代码归属自动化列为低优先级。此目标不代表这些领域已全部实现。**
 
-- 远端 CI 快照：Draft PR #1 head `9b32a3b` 的 GitHub Actions run #73 曾通过 `verify` 和完整 `infrastructure-e2e`；后续 head `7bc9075` 的 run #76 中 `verify` 成功，但 E2E 在 75 req/s × 5 分钟负载后因 k6 实际只发出 22,497 个请求（0 failed、4 dropped）而未达到旧的 22,500 条持久化硬门槛；ClickHouse 完整保存了已发出的 22,497 条。现已将预分配 VUs 提升至 75，并增加 `checks`/`dropped_iterations` 严格阈值；仍保留 22,500 条全量落库验收，待新 CI 复验。#68/#69 的 Issue regression 失败诊断确认任务进入 Loki 前的跨存储快照与清理已消耗大部分 90 秒等待；Loki 请求查询与时间范围匹配，30 秒租约生效。E2E 删除轮询现为 240 秒、该测试总超时 300 秒，并避免失败后重复提交；生产 Loki 等待期不变。其他远端待验收项为生产发布、真实第三方 Webhook、外部 SAML/SCIM IdP 兼容、云端 S3 与生产容量/RPO/RTO，以及 DeepSeek API key。
+- 远端 CI 快照：Draft PR #1 head `9b32a3b` 的 GitHub Actions run #73 曾通过 `verify` 和完整 `infrastructure-e2e`。后续 head `7bc9075` 的 run #76 中 `verify` 成功，但 75 req/s × 5 分钟负载只产生 22,497 次 HTTP 请求（0 failed、4 dropped）；ClickHouse 完整保存了已发出的 22,497 条，旧 22,500 条持久化门槛未达到。修正后 head `391223a` 的 run #77 中 `verify` 成功，压测仍有 6 次 dropped iteration（22,495 次 HTTP 请求、0 failed、P95 4.12 ms），因此严格零丢弃阈值正确阻断 E2E，ClickHouse 全量持久化检查跳过。现将预分配 VUs 提升至 150，保留请求全成功、零 dropped 与 22,500 条全量落库验收，等待再次复验。#68/#69 的 Issue regression 失败诊断确认任务进入 Loki 前的跨存储快照与清理已消耗大部分 90 秒等待；Loki 请求查询与时间范围匹配，30 秒租约生效。E2E 删除轮询现为 240 秒、该测试总超时 300 秒，并避免失败后重复提交；生产 Loki 等待期不变。其他远端待验收项为生产发布、真实第三方 Webhook、外部 SAML/SCIM IdP 兼容、云端 S3 与生产容量/RPO/RTO，以及 DeepSeek API key。
 - 已运行：部署 Compose 的 12 个长期运行服务和 Jaeger 卷初始化服务均属于 `monitor-platform` 项目并带统一 `com.monstereat.observability=true` 标签；数据库/消息/对象存储健康检查通过。基础设施 E2E 已将 Error、Performance、Behavior、Replay 事件写入 ClickHouse 并从 Admin API 查回；Prometheus 的应用与自身 target 均为 `up`。真实浏览器跨源请求已与 API → Kafka Producer → Consumer spans 在 Jaeger 形成同一 Trace。RustFS 是本地 S3 兼容验证替代服务，生产存储路线未改变。
 - 尚未达成的关键验收：Push/Pipeline 到 GHCR Release/生产部署/监控的远端流程、真实第三方 Webhook、外部 SAML/SCIM IdP 厂商兼容性、云端 S3 provider 与生产容量/RPO/RTO 验收、ClickHouse 目标环境专属卷与冷热恢复策略。生产发布、真实 IdP、云存储与容量仍待目标环境；E2E 修复后的隔离复验已恢复，PR 更新时自动运行。官方 MinIO API/lifecycle、ClickHouse 本地容量治理及 Replay 跨进程配额竞争已通过本地运行验收；数据删除、内网 mock Webhook 与 Alertmanager firing/resolved 也已通过本地合成数据验收。
 - 待环境：生产部署和真实第三方 Webhook 仍缺目标环境；DeepSeek AI 调用待用户提供并安全配置 API key。Replay 对象和 DB 索引行均按 30 天保留，项目配额默认 10 GiB。
@@ -117,7 +117,7 @@
 
 ## 最近验证
 
-- 2026-10-04：Replay 配额完整对象扫描新增对象数、总字节、估算列举页数和耗时指标，并分别测量本机锁与 MySQL 命名锁等待；没有项目或对象动态标签，扫描失败不会将部分统计写入配额账本。`MonitorReplayQuotaServiceTest` 14/14 通过，`git diff --check` 通过。k6 压测生成器的预分配 VUs 提至 75，增加全请求检查成功与零 dropped-iterations 阈值；Node 脚本语法及 workflow YAML 解析通过。run #76 已观测到 22,497/22,500 请求落库、0 个 HTTP 错误、4 个 dropped iterations；旧的 ClickHouse 22,500 门槛因此失败，门槛保持全量，改动后的 CI 验收待执行。
+- 2026-10-04：Replay 配额完整对象扫描新增对象数、总字节、估算列举页数和耗时指标，并分别测量本机锁与 MySQL 命名锁等待；没有项目或对象动态标签，扫描失败不会将部分统计写入配额账本。`MonitorReplayQuotaServiceTest` 14/14 通过，`git diff --check` 通过。k6 压测生成器增加全请求检查成功与零 dropped-iterations 阈值，预分配 VUs 从 38 提至 75 后 run #77 仍记录 6 次 dropped iterations；HTTP P95 为 4.12 ms、0 failed，E2E 因严格压测门槛而跳过 ClickHouse 持久化验收。现进一步将预分配 VUs 提至 150。`node --input-type=module --check monitor/scripts/ingest-load.js`、workflow YAML 解析和 diff 检查通过，下一轮 CI 待执行。
 - 2026-10-03：Issue AI 证据采集新增每个来源的 available/no_matches/unavailable 状态、查询/失败/跳过计数和明确限制；逐 Trace 采集遇到单次故障仍继续，日志仅记录安全来源名和异常类型。详情页说明缺失证据表示未知而非不存在。`MonitorIssueAiAnalysisServiceTest` 4/4、Admin build、`git diff --check` 通过；未配置真实 AI provider。
 - 2026-10-03：Release workflow 将 Server/Admin 镜像 tag 改为完整 commit SHA + run ID + attempt，Release 标签只保留为 OCI metadata；GHCR 登录使用按运行隔离的远端 Docker config 并清理；MySQL/ClickHouse 迁移各按版本账本跳过；部署失败时尝试恢复之前的应用镜像，不回滚已应用数据库迁移。回滚未健康时会输出 Server/Admin 日志；发布文档说明迁移部分失败可能留下非事务 DDL。workflow YAML 解析、所有 run 脚本 `bash -n`、27 个 MySQL 与 5 个 ClickHouse migration 唯一版本检查及 `git diff --check` 通过。当前尚未触发 GitHub Actions、GHCR 发布或生产部署。
 - 2026-10-03：本地 P8 运行态复核：13 个 Compose 容器均在运行，Server 为 healthy；ClickHouse 磁盘使用率 88.6%、剩余约 10.02 GiB。Prometheus 当前 `ClickHouseDiskUsageHigh=firing`、`ClickHouseDiskHeadroomLow=pending`。数据删除 job 25 仍为 `RUNNING/LOKI_DELETE_POLL`，唯一关联 Loki request `cb76ea58` 状态仍为 `received`，lease 延至本地 22:01:55；请求创建于 20:41:40，Loki 默认 24 小时可撤销窗口将到 2026-10-04 20:41:40，尚不能验证物理删除。该请求持续由本地 worker 轮询，不手动越过 Loki 的撤销等待期。
