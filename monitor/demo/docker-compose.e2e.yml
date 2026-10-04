@@ -41,6 +41,23 @@ services:
       retries: 20
       start_period: 2s
 
+  k6:
+    image: grafana/k6:2.3.0
+    labels: *monitor-service-labels
+    profiles:
+      - load
+    environment:
+      BASE_URL: http://server:8080
+      PROJECT_ID: demo-web
+      INGEST_KEY: dev-monitor-key
+      RATE: "75"
+      DURATION: 5m
+    depends_on:
+      server:
+        condition: service_healthy
+    volumes:
+      - ./monitor/scripts:/scripts:ro
+
   demo:
     image: nginx:1.29.4-alpine
     labels: *monitor-service-labels
