@@ -303,4 +303,6 @@
 
 - 2026-10-04 12:33 +08:00：用户选择优先完成本地可验证项。Docker 全局可回收量跨项目，监控项目没有确认安全且足以降低 High 告警的回收对象；未执行跨项目清理。ClickHouse VM 使用率 84%/约 13.97 GiB 可用，`ClickHouseDiskUsageHigh` 仍 firing。PR #1 run #80 的 `verify` 与完整 E2E 均通过；生产、外部 IdP、云 S3 与生产容量/RPO/RTO 暂留待目标信息。
 
-- 2026-10-04 13:22 +08:00：PR #1 run #81（Roadmap head `59f3b55`）的 `verify` 与完整 `infrastructure-e2e` 均成功，含 75 req/s 持续压测、ClickHouse 持久化、告警恢复、Trace、Issue 回归、Replay、smoke 和 teardown。当前本地删除 job 25 仍为 `RUNNING/LOKI_DELETE_POLL`，lease 至 13:26；Loki request `cb76ea58` 仍为 `received`，24 小时撤销期至 20:40:28 +08:00，因此尚未宣称物理删除完成。
+- 2026-10-04 13:22 +08:00：PR #1 run #81（Roadmap head `59f3b55`）的 `verify` 与完整 `infrastructure-e2e` 均成功，含 75 req/s 持续压测、ClickHouse 持久化、告警恢复、Trace、Issue 回归、Replay、smoke 和 teardown。当前本地删除 job 25 仍为 `RUNNING/LOKI_DELETE_POLL`，lease 至 13:26；Loki request `cb76ea58` 仍为 `received`。Loki `created_at` 为 2026-10-03 20:41:40 +08:00，因此 24 小时撤销期至 2026-10-04 20:41:40 +08:00，之前不宣称物理删除完成。
+
+- 2026-10-04 13:51 +08:00：PR #1 run #82（head `aee8ba1`）的 `verify` 与完整 `infrastructure-e2e` 均成功，包括 75 req/s × 5 分钟负载、ClickHouse 持久化、告警恢复、浏览器/OTLP Trace、Issue regression、Replay、smoke 与 teardown。[run #82](https://github.com/monstereat/mall-tiny/actions/runs/37179773313)。本地 Loki 3.5.5 隔离删除验收再次通过：合成日志从持久化存储可查询，删除后查询为空且唯一 chunk 对象移除；临时容器和存储目录已清理，未触碰共享 Loki、数据库或 job 25。运行中的 Kafka 曾在本机高负载时出现 KRaft/Admin 请求超时并标为 unhealthy；负载回落后 quorum 查询成功，标准 topic-list 命令 4 秒返回，健康状态恢复为 healthy，未重启服务或改配置。job 25 仍为 `RUNNING/LOKI_DELETE_POLL`，Loki request `cb76ea58` 仍为 `received`；实际撤销窗口以 Loki `created_at` 起算，至 20:41:40 +08:00 后再复核物理删除。
