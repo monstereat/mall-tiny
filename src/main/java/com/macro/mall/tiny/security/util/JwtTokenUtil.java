@@ -93,7 +93,8 @@ public class JwtTokenUtil {
      */
     public boolean validateToken(String token, UserDetails userDetails) {
         String username = getUserNameFromToken(token);
-        return username != null && username.equals(userDetails.getUsername()) && !isTokenExpired(token);
+        return userDetails.isEnabled() && username != null && username.equals(userDetails.getUsername())
+                && !isTokenExpired(token);
     }
 
     /**
@@ -143,6 +144,30 @@ public class JwtTokenUtil {
         claims.put(CLAIM_KEY_CREATED, new Date());
         return generateToken(claims);
     }
+
+    public String generateSamlToken(UserDetails userDetails, String tenantKey, String subject) {
+        return generateSamlToken(userDetails, tenantKey, subject, System.currentTimeMillis());
+    }
+
+    public String generateSamlToken(UserDetails userDetails, String tenantKey, String subject, long issuedAt) {
+        Map<String, Object> claims = new HashMap<>();
+        claims.put(CLAIM_KEY_USERNAME, userDetails.getUsername());
+        claims.put(CLAIM_KEY_CREATED, new Date());
+        claims.put("saml_tenant", tenantKey);
+        claims.put("saml_subject", subject);
+        claims.put("saml_issued_at", issuedAt);
+        return generateToken(claims);
+    }
+
+    public SamlTokenIdentity getSamlTokenIdentity(String token) {
+        Map<String, Object> payload = getPayloadFromToken(token);
+        if (payload == null || !(payload.get("saml_tenant") instanceof String tenant)
+                || !(payload.get("saml_subject") instanceof String subject)
+                || !(payload.get("saml_issued_at") instanceof Number issuedAt)) return null;
+        return new SamlTokenIdentity(tenant, subject, issuedAt.longValue());
+    }
+
+    public record SamlTokenIdentity(String tenantKey, String subject, long issuedAt) { }
 
     /**
      * 当原来的token没过期时是可以刷新的

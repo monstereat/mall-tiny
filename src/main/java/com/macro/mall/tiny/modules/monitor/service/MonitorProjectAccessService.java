@@ -4,8 +4,14 @@ import com.baomidou.mybatisplus.core.toolkit.Wrappers;
 import com.macro.mall.tiny.modules.monitor.dto.MonitorProjectMemberRequest;
 import com.macro.mall.tiny.modules.monitor.mapper.MonitorProjectMapper;
 import com.macro.mall.tiny.modules.monitor.mapper.MonitorProjectMemberMapper;
+import com.macro.mall.tiny.modules.monitor.mapper.MonitorTenantMemberMapper;
+import com.macro.mall.tiny.modules.monitor.mapper.MonitorTeamMapper;
+import com.macro.mall.tiny.modules.monitor.mapper.MonitorTeamMemberMapper;
 import com.macro.mall.tiny.modules.monitor.model.MonitorProject;
 import com.macro.mall.tiny.modules.monitor.model.MonitorProjectMember;
+import com.macro.mall.tiny.modules.monitor.model.MonitorTenantMember;
+import com.macro.mall.tiny.modules.monitor.model.MonitorTeam;
+import com.macro.mall.tiny.modules.monitor.model.MonitorTeamMember;
 import com.macro.mall.tiny.modules.ums.model.UmsAdmin;
 import com.macro.mall.tiny.modules.ums.model.UmsResource;
 import com.macro.mall.tiny.modules.ums.service.UmsAdminService;
@@ -18,7 +24,10 @@ import org.springframework.transaction.annotation.Transactional;
 import org.springframework.web.server.ResponseStatusException;
 
 import java.util.List;
+import java.util.LinkedHashSet;
+import java.util.Map;
 import java.util.Set;
+import java.util.stream.Collectors;
 
 @Service
 @RequiredArgsConstructor
@@ -26,6 +35,9 @@ public class MonitorProjectAccessService {
 
     private final MonitorProjectMapper projectMapper;
     private final MonitorProjectMemberMapper memberMapper;
+    private final MonitorTenantMemberMapper tenantMemberMapper;
+    private final MonitorTeamMapper teamMapper;
+    private final MonitorTeamMemberMapper teamMemberMapper;
     private final UmsAdminService adminService;
 
     public Long currentAdminId() {
@@ -41,21 +53,62 @@ public class MonitorProjectAccessService {
     }
 
     public List<MonitorProject> listProjects() {
-        List<MonitorProjectMember> memberships = memberMapper.selectList(
-                Wrappers.<MonitorProjectMember>lambdaQuery()
-                        .eq(MonitorProjectMember::getAdminId, currentAdminId())
-                        .orderByAsc(MonitorProjectMember::getProjectId)
+        Long adminId = currentAdminId();
+        List<MonitorTenantMember> tenantMemberships = tenantMemberMapper.selectList(
+                Wrappers.<MonitorTenantMember>lambdaQuery()
+                        .eq(MonitorTenantMember::getAdminId, adminId)
         );
-        if (memberships.isEmpty()) {
+        if (tenantMemberships.isEmpty()) {
             return List.of();
         }
-        List<Long> projectIds = memberships.stream().map(MonitorProjectMember::getProjectId).distinct().toList();
-        return projectMapper.selectList(
+        List<Long> tenantIds = tenantMemberships.stream()
+                .map(MonitorTenantMember::getTenantId).distinct().toList();
+        Set<Long> projectIds = new LinkedHashSet<>();
+        List<MonitorProjectMember> memberships = memberMapper.selectList(
+                Wrappers.<MonitorProjectMember>lambdaQuery()
+                        .eq(MonitorProjectMember::getAdminId, adminId)
+                        .orderByAsc(MonitorProjectMember::getProjectId)
+        );
+        memberships.stream().map(MonitorProjectMember::getProjectId).forEach(projectIds::add);
+        List<MonitorTeamMember> teamMemberships = teamMemberMapper.selectList(
+                Wrappers.<MonitorTeamMember>lambdaQuery().eq(MonitorTeamMember::getAdminId, adminId)
+        );
+        List<Long> teamIds = teamMemberships.stream().map(MonitorTeamMember::getTeamId).distinct().toList();
+        if (!teamIds.isEmpty()) {
+            projectMapper.selectList(Wrappers.<MonitorProject>lambdaQuery()
+                            .in(MonitorProject::getTeamId, teamIds)
+                            .in(MonitorProject::getTenantId, tenantIds)
+                            .eq(MonitorProject::getStatus, 1))
+                    .stream().map(MonitorProject::getId).forEach(projectIds::add);
+        }
+        if (projectIds.isEmpty()) {
+            return List.of();
+        }
+        List<MonitorProject> projects = projectMapper.selectList(
                 Wrappers.<MonitorProject>lambdaQuery()
                         .in(MonitorProject::getId, projectIds)
+                        .in(MonitorProject::getTenantId, tenantIds)
                         .eq(MonitorProject::getStatus, 1)
                         .orderByAsc(MonitorProject::getId)
         );
+        Map<Long, String> tenantRoles = tenantMemberships.stream().collect(Collectors.toMap(
+                MonitorTenantMember::getTenantId, MonitorTenantMember::getRole, (first, ignored) -> first
+        ));
+        Map<Long, String> projectRoles = memberships.stream().collect(Collectors.toMap(
+                MonitorProjectMember::getProjectId, MonitorProjectMember::getRole, (first, ignored) -> first
+        ));
+        Map<Long, String> teamRoles = teamMemberships.stream().collect(Collectors.toMap(
+                MonitorTeamMember::getTeamId, MonitorTeamMember::getRole, (first, ignored) -> first
+        ));
+        for (MonitorProject project : projects) {
+            String effectiveRole = projectRoles.get(project.getId());
+            if (effectiveRole == null) {
+                effectiveRole = teamRoles.get(project.getTeamId());
+            }
+            project.setCanWrite(!"VIEWER".equals(tenantRoles.get(project.getTenantId()))
+                    && effectiveRole != null && !"VIEWER".equals(effectiveRole));
+        }
+        return projects;
     }
 
     public MonitorProject requireProject(String projectKey, boolean write) {
@@ -68,12 +121,18 @@ public class MonitorProjectAccessService {
         if (project == null) {
             throw new ResponseStatusException(HttpStatus.NOT_FOUND, "monitor project not found");
         }
-        MonitorProjectMember membership = findMembership(project.getId(), currentAdminId());
-        if (membership == null) {
+        MonitorTenantMember tenantMembership = findTenantMembership(project.getTenantId(), currentAdminId());
+        if (tenantMembership == null) {
             // Hide whether an inaccessible project exists.
             throw new ResponseStatusException(HttpStatus.NOT_FOUND, "monitor project not found");
         }
-        if (write && "VIEWER".equals(membership.getRole())) {
+        MonitorProjectMember membership = findMembership(project.getId(), currentAdminId());
+        MonitorTeamMember teamMembership = findTeamMembership(project.getTenantId(), project.getTeamId(), currentAdminId());
+        if (membership == null && teamMembership == null) {
+            throw new ResponseStatusException(HttpStatus.NOT_FOUND, "monitor project not found");
+        }
+        String effectiveRole = membership == null ? teamMembership.getRole() : membership.getRole();
+        if (write && ("VIEWER".equals(tenantMembership.getRole()) || "VIEWER".equals(effectiveRole))) {
             throw new ResponseStatusException(HttpStatus.FORBIDDEN, "project write permission required");
         }
         return project;
@@ -83,6 +142,56 @@ public class MonitorProjectAccessService {
         MonitorProject project = requireProject(projectKey, true);
         requireOwner(project.getId());
         return project;
+    }
+
+    public boolean canManageProject(MonitorProject project) {
+        Long adminId = currentAdminId();
+        MonitorTenantMember tenantMembership = findTenantMembership(project.getTenantId(), adminId);
+        MonitorProjectMember membership = findMembership(project.getId(), adminId);
+        return tenantMembership != null && !"VIEWER".equals(tenantMembership.getRole())
+                && membership != null && "OWNER".equals(membership.getRole());
+    }
+
+    public MonitorTeam teamForProjectCreation(Long requestedTeamId) {
+        Long adminId = currentAdminId();
+        MonitorTeam team;
+        if (requestedTeamId != null) {
+            team = teamMapper.selectById(requestedTeamId);
+        } else {
+            List<MonitorTenantMember> writableMemberships = tenantMemberMapper.selectList(
+                    Wrappers.<MonitorTenantMember>lambdaQuery()
+                            .eq(MonitorTenantMember::getAdminId, adminId)
+                            .ne(MonitorTenantMember::getRole, "VIEWER")
+                            .orderByAsc(MonitorTenantMember::getTenantId)
+            );
+            if (writableMemberships.isEmpty()) {
+                throw new ResponseStatusException(HttpStatus.FORBIDDEN, "tenant project creation permission required");
+            }
+            if (writableMemberships.size() > 1) {
+                throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "teamId is required when multiple tenants are available");
+            }
+            team = teamMapper.selectOne(Wrappers.<MonitorTeam>lambdaQuery()
+                    .eq(MonitorTeam::getTenantId, writableMemberships.get(0).getTenantId())
+                    .eq(MonitorTeam::getIsDefault, 1)
+                    .last("LIMIT 1"));
+        }
+        if (team == null) {
+            throw new ResponseStatusException(HttpStatus.NOT_FOUND, "team not found");
+        }
+        MonitorTenantMember tenantMembership = findTenantMembership(team.getTenantId(), adminId);
+        if (tenantMembership == null) {
+            throw new ResponseStatusException(HttpStatus.NOT_FOUND, "team not found");
+        }
+        if ("VIEWER".equals(tenantMembership.getRole())) {
+            throw new ResponseStatusException(HttpStatus.FORBIDDEN, "tenant write permission required");
+        }
+        if (!"OWNER".equals(tenantMembership.getRole())) {
+            MonitorTeamMember teamMembership = findTeamMembership(team.getTenantId(), team.getId(), adminId);
+            if (teamMembership == null || "VIEWER".equals(teamMembership.getRole())) {
+                throw new ResponseStatusException(HttpStatus.FORBIDDEN, "team project creation permission required");
+            }
+        }
+        return team;
     }
 
     public List<MonitorProjectMember> listMembers(String projectKey) {
@@ -105,6 +214,9 @@ public class MonitorProjectAccessService {
         UmsAdmin target = adminService.getById(request.getAdminId());
         if (target == null || target.getStatus() == null || target.getStatus() != 1) {
             throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "active admin account not found");
+        }
+        if (findTenantMembership(project.getTenantId(), request.getAdminId()) == null) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "admin must first be added to the project tenant");
         }
         List<UmsResource> targetResources = adminService.getResourceList(target.getId());
         boolean hasMonitorAdminResource = targetResources != null && targetResources.stream()
@@ -163,10 +275,32 @@ public class MonitorProjectAccessService {
     }
 
     private void requireOwner(Long projectId) {
-        MonitorProjectMember membership = findMembership(projectId, currentAdminId());
-        if (membership == null || !"OWNER".equals(membership.getRole())) {
+        MonitorProject project = projectMapper.selectById(projectId);
+        if (project == null) {
+            throw new ResponseStatusException(HttpStatus.NOT_FOUND, "monitor project not found");
+        }
+        Long adminId = currentAdminId();
+        MonitorTenantMember tenantMembership = findTenantMembership(project.getTenantId(), adminId);
+        MonitorProjectMember membership = findMembership(projectId, adminId);
+        if (tenantMembership == null) {
+            throw new ResponseStatusException(HttpStatus.NOT_FOUND, "monitor project not found");
+        }
+        if ("VIEWER".equals(tenantMembership.getRole())
+                || membership == null || !"OWNER".equals(membership.getRole())) {
             throw new ResponseStatusException(HttpStatus.FORBIDDEN, "project owner permission required");
         }
+    }
+
+    private MonitorTenantMember findTenantMembership(Long tenantId, Long adminId) {
+        if (tenantId == null) {
+            return null;
+        }
+        return tenantMemberMapper.selectOne(
+                Wrappers.<MonitorTenantMember>lambdaQuery()
+                        .eq(MonitorTenantMember::getTenantId, tenantId)
+                        .eq(MonitorTenantMember::getAdminId, adminId)
+                        .last("LIMIT 1")
+        );
     }
 
     private MonitorProjectMember findMembership(Long projectId, Long adminId) {
@@ -176,5 +310,16 @@ public class MonitorProjectAccessService {
                         .eq(MonitorProjectMember::getAdminId, adminId)
                         .last("LIMIT 1")
         );
+    }
+
+    private MonitorTeamMember findTeamMembership(Long tenantId, Long teamId, Long adminId) {
+        if (tenantId == null || teamId == null) {
+            return null;
+        }
+        return teamMemberMapper.selectOne(Wrappers.<MonitorTeamMember>lambdaQuery()
+                .eq(MonitorTeamMember::getTenantId, tenantId)
+                .eq(MonitorTeamMember::getTeamId, teamId)
+                .eq(MonitorTeamMember::getAdminId, adminId)
+                .last("LIMIT 1"));
     }
 }

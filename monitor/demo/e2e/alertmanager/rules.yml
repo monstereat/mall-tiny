@@ -1,0 +1,11 @@
+groups:
+  - name: alertmanager-notification-e2e
+    rules:
+      - alert: E2EAlertmanagerNotification
+        expr: monitor_e2e_alert_trigger == 1
+        labels:
+          severity: warning
+          e2e: alertmanager
+        annotations:
+          summary: Alertmanager notification E2E probe
+          description: Test-only alert controlled by the local E2E receiver.

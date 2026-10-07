@@ -5,6 +5,10 @@ export interface ReplayOptions {
   flushInterval?: number;
   maxEvents?: number;
   maskAllInputs?: boolean;
+  /** CSS selector for text to mask. Defaults to [data-monitor-mask]. */
+  maskTextSelector?: string;
+  /** CSS selector for content to block from Replay. Defaults to [data-monitor-block]. */
+  blockSelector?: string;
   /** Keep an unsampled session in memory and upload it when an error is captured. Defaults to false. */
   retainOnError?: boolean;
   /** Sampling rate for sessions outside high-risk routes. Defaults to 1. */
@@ -80,8 +84,8 @@ export function startReplay(client: MonitorClient, options: ReplayOptions = {}):
         if (events.length > maxEvents) events.splice(0, events.length - maxEvents);
       },
       maskAllInputs: options.maskAllInputs ?? true,
-      maskTextSelector: '[data-monitor-mask]',
-      blockSelector: '[data-monitor-block]'
+      maskTextSelector: options.maskTextSelector ?? '[data-monitor-mask]',
+      blockSelector: options.blockSelector ?? '[data-monitor-block]'
     });
   };
 

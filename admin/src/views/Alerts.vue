@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { reactive, ref, watch } from 'vue';
-import { ElMessage } from 'element-plus';
-import { monitorApi, type AlertDelivery, type AlertRecord, type AlertRule, type AlertSilence } from '../api/monitor';
+import { ElMessage, ElMessageBox } from 'element-plus';
+import { monitorApi, type AlertDelivery, type AlertNotificationRoute, type AlertNotificationRouteOption, type AlertRecord, type AlertRule, type AlertSilence } from '../api/monitor';
 import { useProjectStore } from '../stores/project';
 
 const projects = useProjectStore();
@@ -11,6 +11,12 @@ const dialog = ref(false);
 const silenceDialog = ref(false);
 const silences = ref<AlertSilence[]>([]);
 const deliveries = ref<AlertDelivery[]>([]);
+const routeOptions = ref<AlertNotificationRouteOption[]>([]);
+const tenantRoutes = ref<AlertNotificationRoute[]>([]);
+const canManageRoutes = ref(false);
+const routesDialog = ref(false);
+const routeFormDialog = ref(false);
+const routeForm = reactive<{ id?: number; name: string; webhookUrl: string }>({ name: '', webhookUrl: '' });
 const silenceForm = reactive<{
   scope: AlertSilence['scope']; ruleId?: number; fingerprint: string;
   reason: string; durationSeconds: number;
@@ -31,12 +37,26 @@ const form = reactive<AlertRule>({
 async function load() {
   if (!projects.currentKey) return;
   try {
-    [rules.value, records.value, silences.value, deliveries.value] = await Promise.all([
+    const project = projects.projects.find(item => item.projectKey === projects.currentKey);
+    [rules.value, records.value, silences.value, deliveries.value, routeOptions.value] = await Promise.all([
       monitorApi.alertRules(projects.currentKey),
       monitorApi.alertRecords(projects.currentKey),
       monitorApi.alertSilences(projects.currentKey),
-      monitorApi.alertDeliveries(projects.currentKey)
+      monitorApi.alertDeliveries(projects.currentKey),
+      monitorApi.alertNotificationRoutes(projects.currentKey)
     ]);
+    if (project?.tenantId) {
+      try {
+        tenantRoutes.value = await monitorApi.tenantAlertNotificationRoutes(project.tenantId);
+        canManageRoutes.value = true;
+      } catch {
+        tenantRoutes.value = [];
+        canManageRoutes.value = false;
+      }
+    } else {
+      tenantRoutes.value = [];
+      canManageRoutes.value = false;
+    }
   } catch (e) {
     ElMessage.error(e instanceof Error ? e.message : '加载失败');
   }
@@ -80,7 +100,7 @@ function create() {
   Object.assign(form, {
     id: undefined, name: '', metric: 'error_count', operator: '>', thresholdValue: 100,
     windowSeconds: 300, durationSeconds: 0, cooldownSeconds: 900,
-    level: 'warning', webhookUrl: '', enabled: 1
+    level: 'warning', webhookUrl: '', notificationRouteId: undefined, enabled: 1
   });
   dialog.value = true;
 }
@@ -103,6 +123,46 @@ async function save() {
   }
 }
 
+function createRoute() {
+  Object.assign(routeForm, { id: undefined, name: '', webhookUrl: '' });
+  routeFormDialog.value = true;
+}
+
+function editRoute(route: AlertNotificationRoute) {
+  Object.assign(routeForm, route);
+  routeFormDialog.value = true;
+}
+
+async function saveRoute() {
+  const project = projects.projects.find(item => item.projectKey === projects.currentKey);
+  if (!project?.tenantId) return;
+  try {
+    const payload = { name: routeForm.name.trim(), webhookUrl: routeForm.webhookUrl.trim() };
+    if (routeForm.id) await monitorApi.updateTenantAlertNotificationRoute(project.tenantId, routeForm.id, payload);
+    else await monitorApi.createTenantAlertNotificationRoute(project.tenantId, payload);
+    routeFormDialog.value = false;
+    await load();
+    ElMessage.success('通知路由已保存');
+  } catch (e) {
+    ElMessage.error(e instanceof Error ? e.message : '通知路由保存失败');
+  }
+}
+
+async function deleteRoute(route: AlertNotificationRoute) {
+  const project = projects.projects.find(item => item.projectKey === projects.currentKey);
+  if (!project?.tenantId) return;
+  try {
+    await ElMessageBox.confirm(`删除租户通知路由“${route.name}”？`, '删除通知路由', { type: 'warning' });
+    await monitorApi.deleteTenantAlertNotificationRoute(project.tenantId, route.id);
+    await load();
+    ElMessage.success('通知路由已删除');
+  } catch (e) {
+    if (e instanceof Error && e.message !== 'cancel' && e.message !== 'close') {
+      ElMessage.error(e.message || '通知路由删除失败');
+    }
+  }
+}
+
 watch(() => projects.currentKey, load, { immediate: true });
 </script>
 
@@ -111,6 +171,7 @@ watch(() => projects.currentKey, load, { immediate: true });
     <div class="toolbar">
       <h1 class="page-title" style="margin:0">Alerts</h1>
       <el-button @click="createSilence">创建静默</el-button>
+      <el-button v-if="canManageRoutes" @click="routesDialog = true">租户通知路由</el-button>
       <el-button type="primary" @click="create">新增规则</el-button>
     </div>
     <div class="panel">
@@ -130,6 +191,46 @@ watch(() => projects.currentKey, load, { immediate: true });
     </div>
     <div class="panel">
       <h3>告警规则</h3>
+      <el-alert
+        title="Issue 首发与回归通知"
+        description="分别创建 new_issue 和 issue_regression 告警规则并配置通知路由或 Webhook。Issue 首次创建或从 resolved 回归时各触发一次；事件去重、Issue 级串行处理和现有静默可避免重复通知。阈值、窗口、持续时间和 cooldown 不参与这两类事件通知。"
+        type="info"
+        :closable="false"
+        show-icon
+        style="margin-bottom: 12px"
+      />
+      <el-alert
+        title="Cron Monitor 告警"
+        description="将 Metric 设为 cron_unhealthy_count，即可统计项目内处于 warning 或 error 的启用 Cron 监控，并复用当前告警规则的静默、恢复和 Webhook 投递。"
+        type="info"
+        :closable="false"
+        show-icon
+        style="margin-bottom: 12px"
+      />
+      <el-alert
+        title="Uptime Monitor 告警"
+        description="uptime_unhealthy_count 统计 warning/down 的启用站点；uptime_max_latency_ms 使用启用站点最近一次检查的最大延迟。两者都复用当前规则的持续时间、静默、恢复与 Webhook 投递。"
+        type="info"
+        :closable="false"
+        show-icon
+        style="margin-bottom: 12px"
+      />
+      <el-alert
+        title="API 请求失败告警"
+        description="将 Metric 设为 api_failure_count，可按窗口统计 Browser SDK 上报的 API Behavior 事件：HTTP 4xx/5xx 与网络失败（status=0）。规则继续使用当前项目的持续时间、静默、恢复和 Webhook 投递。"
+        type="info"
+        :closable="false"
+        show-icon
+        style="margin-bottom: 12px"
+      />
+      <el-alert
+        title="项目日志错误告警"
+        description="log_error_count 按窗口统计 Loki 中带当前项目标识的 ERROR 日志，每 30 秒评估一次；触发后继续使用当前规则的持续时间、静默、恢复和 Webhook 投递。"
+        type="info"
+        :closable="false"
+        show-icon
+        style="margin-bottom: 12px"
+      />
       <el-table :data="rules">
         <el-table-column prop="name" label="名称" />
         <el-table-column prop="metric" label="Metric" />
@@ -175,8 +276,15 @@ watch(() => projects.currentKey, load, { immediate: true });
       <el-form label-width="110px">
         <el-form-item label="名称"><el-input v-model="form.name" /></el-form-item>
         <el-form-item label="Metric">
-          <el-select v-model="form.metric" style="width:100%">
+          <el-select v-model="form.metric" filterable allow-create default-first-option style="width:100%">
             <el-option label="Error Count" value="error_count" />
+            <el-option label="New Issue" value="new_issue" />
+            <el-option label="Issue Regression" value="issue_regression" />
+            <el-option label="API Failure Count" value="api_failure_count" />
+            <el-option label="Log Error Count" value="log_error_count" />
+            <el-option label="Cron Unhealthy Count" value="cron_unhealthy_count" />
+            <el-option label="Uptime Unhealthy Count" value="uptime_unhealthy_count" />
+            <el-option label="Uptime Max Latency (ms)" value="uptime_max_latency_ms" />
             <el-option label="LCP" value="LCP" />
             <el-option label="FCP" value="FCP" />
             <el-option label="CLS" value="CLS" />
@@ -190,10 +298,30 @@ watch(() => projects.currentKey, load, { immediate: true });
         <el-form-item label="持续(s)"><el-input-number v-model="form.durationSeconds" :min="0" style="width:100%" /></el-form-item>
         <el-form-item label="Cooldown(s)"><el-input-number v-model="form.cooldownSeconds" :min="60" style="width:100%" /></el-form-item>
         <el-form-item label="级别"><el-select v-model="form.level" style="width:100%"><el-option label="warning" value="warning"/><el-option label="critical" value="critical"/></el-select></el-form-item>
-        <el-form-item label="Webhook"><el-input v-model="form.webhookUrl" /></el-form-item>
+        <el-form-item label="通知路由"><el-select v-model="form.notificationRouteId" clearable placeholder="租户共享路由（可选）" style="width:100%"><el-option v-for="route in routeOptions" :key="route.id" :label="route.name" :value="route.id" /></el-select></el-form-item>
+        <el-form-item label="Webhook 兼容"><el-input v-model="form.webhookUrl" placeholder="未选择共享路由时使用" /></el-form-item>
         <el-form-item label="启用"><el-switch v-model="form.enabled" :active-value="1" :inactive-value="0" /></el-form-item>
       </el-form>
       <template #footer><el-button @click="dialog=false">取消</el-button><el-button type="primary" @click="save">保存</el-button></template>
+    </el-dialog>
+
+    <el-dialog v-model="routesDialog" title="租户共享通知路由" width="760px">
+      <div class="toolbar"><span>路由可被当前租户的多个项目告警规则共用。</span><el-button type="primary" @click="createRoute">新增路由</el-button></div>
+      <el-table :data="tenantRoutes">
+        <el-table-column prop="name" label="名称" min-width="150" />
+        <el-table-column prop="webhookUrl" label="Webhook URL" min-width="360" show-overflow-tooltip />
+        <el-table-column label="操作" width="150">
+          <template #default="{ row }"><el-button link type="primary" @click="editRoute(row)">编辑</el-button><el-button link type="danger" @click="deleteRoute(row)">删除</el-button></template>
+        </el-table-column>
+      </el-table>
+    </el-dialog>
+
+    <el-dialog v-model="routeFormDialog" :title="routeForm.id ? '编辑通知路由' : '新增通知路由'" width="520px">
+      <el-form label-width="110px">
+        <el-form-item label="名称"><el-input v-model="routeForm.name" maxlength="100" /></el-form-item>
+        <el-form-item label="Webhook URL"><el-input v-model="routeForm.webhookUrl" maxlength="1024" placeholder="https://hooks.example.com/..." /></el-form-item>
+      </el-form>
+      <template #footer><el-button @click="routeFormDialog = false">取消</el-button><el-button type="primary" @click="saveRoute">保存</el-button></template>
     </el-dialog>
 
     <el-dialog v-model="silenceDialog" title="创建告警静默" width="520px">
