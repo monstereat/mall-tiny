@@ -1,0 +1,15 @@
+global:
+  resolve_timeout: 5m
+
+route:
+  receiver: unconfigured
+  group_by: [alertname]
+  group_wait: 30s
+  group_interval: 5m
+  repeat_interval: 4h
+
+# Keep Alertmanager operational without sending notifications to a fabricated
+# external destination. A deployment-specific receiver URL belongs in the
+# deployment configuration. The E2E-only config exercises an HTTP receiver.
+receivers:
+  - name: unconfigured

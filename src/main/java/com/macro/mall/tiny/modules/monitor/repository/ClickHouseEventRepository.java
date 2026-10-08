@@ -82,6 +82,9 @@ public class ClickHouseEventRepository {
             case PERFORMANCE -> "performance_event";
             case BEHAVIOR -> "behavior_event";
             case REPLAY -> "replay_event";
+            case METRIC -> "metric_event";
+            case PROFILE -> "profile_event";
+            case SPAN -> "span_event";
         };
     }
 

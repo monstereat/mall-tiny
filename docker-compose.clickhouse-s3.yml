@@ -1,0 +1,8 @@
+services:
+  clickhouse:
+    environment:
+      CLICKHOUSE_S3_ENDPOINT: ${CLICKHOUSE_S3_ENDPOINT:?Set CLICKHOUSE_S3_ENDPOINT to the bucket endpoint}
+      CLICKHOUSE_S3_ACCESS_KEY_ID: ${CLICKHOUSE_S3_ACCESS_KEY_ID:?Set CLICKHOUSE_S3_ACCESS_KEY_ID}
+      CLICKHOUSE_S3_SECRET_ACCESS_KEY: ${CLICKHOUSE_S3_SECRET_ACCESS_KEY:?Set CLICKHOUSE_S3_SECRET_ACCESS_KEY}
+    volumes:
+      - ./infra/clickhouse/config-s3-cold/monitor-s3-cold.xml:/etc/clickhouse-server/config.d/monitor-s3-cold.xml:ro

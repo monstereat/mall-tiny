@@ -220,8 +220,11 @@ docker compose up -d
 
 ### 5.2 服务端
 
+Ingest 默认按项目限制为每分钟 5000 条。可在宿主机启动服务前设置 `MONITOR_RATE_LIMIT_PER_MINUTE` 覆盖：
+
 ```bash
-mvn test
+MONITOR_RATE_LIMIT_PER_MINUTE=10000 mvn spring-boot:run
+# 或先 export MONITOR_RATE_LIMIT_PER_MINUTE=10000，再运行：
 mvn spring-boot:run
 ```
 

@@ -15,6 +15,7 @@
     "typecheck": "tsc -p tsconfig.json --noEmit"
   },
   "dependencies": {
-    "@observe/core": "workspace:*"
+    "@observe/core": "workspace:*",
+    "web-vitals": "6.2.2"
   }
 }

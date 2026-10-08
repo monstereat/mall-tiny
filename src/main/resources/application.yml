@@ -1,5 +1,11 @@
 server:
+  forward-headers-strategy: framework
   port: 8080
+  servlet:
+    session:
+      cookie:
+        same-site: ${MONITOR_SESSION_COOKIE_SAME_SITE:Lax}
+        secure: ${MONITOR_SESSION_COOKIE_SECURE:false}
 
 management:
   server:
@@ -81,6 +87,20 @@ redis:
     common: 86400
 
 monitor:
+  sso:
+    frontend-base-url: ${MONITOR_ADMIN_BASE_URL:http://localhost:18088}
+    sp-private-key-base64: ${MONITOR_SAML_SP_PRIVATE_KEY_BASE64:}
+    sp-certificate-base64: ${MONITOR_SAML_SP_CERTIFICATE_BASE64:}
+  ai:
+    enabled: ${MONITOR_AI_ENABLED:false}
+    api-key: ${MONITOR_AI_API_KEY:${OPENAI_API_KEY:}}
+    base-url: ${MONITOR_AI_BASE_URL:https://api.openai.com/v1}
+    model: ${MONITOR_AI_MODEL:gpt-6-astra}
+  alert:
+    dingtalk:
+      webhook-url: ${DINGTALK_WEBHOOK_URL:}
+      secret: ${DINGTALK_SECRET:}
+      tenant-id: ${DINGTALK_TENANT_ID:}
   ingest:
     rate-limit-per-minute: ${MONITOR_RATE_LIMIT_PER_MINUTE:5000}
   kafka:
@@ -89,6 +109,8 @@ monitor:
       performance: monitor-performance-v1
       behavior: monitor-behavior-v1
       replay: monitor-replay-v1
+      metric: monitor-metric-v1
+      profile: monitor-profile-v1
   clickhouse:
     url: ${CLICKHOUSE_JDBC_URL:jdbc:clickhouse://localhost:8123/monitor}
     username: ${CLICKHOUSE_USERNAME:default}
@@ -99,6 +121,7 @@ monitor:
     secret-key: ${MINIO_SECRET_KEY:monitor123456}
     source-map-bucket: ${MINIO_SOURCEMAP_BUCKET:monitor-sourcemaps}
     replay-retention-days: ${MONITOR_REPLAY_RETENTION_DAYS:30}
+    replay-project-quota-bytes: ${MONITOR_REPLAY_PROJECT_QUOTA_BYTES:10737418240}
     replay-index-cleanup-cron: ${MONITOR_REPLAY_INDEX_CLEANUP_CRON:0 15 * * * *}
     replay-index-cleanup-batch-size: ${MONITOR_REPLAY_INDEX_CLEANUP_BATCH_SIZE:500}
     replay-index-cleanup-max-batches: ${MONITOR_REPLAY_INDEX_CLEANUP_MAX_BATCHES:10}
@@ -123,6 +146,11 @@ secure:
       - /admin/info
       - /admin/logout
       - /api/v1/envelope
+      - /api/v1/otlp/**
+      - /scim/v2/**
+      - /saml2/**
+      - /login/saml2/**
+      - /monitor/sso/**
 
 logging:
   pattern:

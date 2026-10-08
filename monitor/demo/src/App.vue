@@ -1,9 +1,28 @@
 <script setup lang="ts">
 import { inject } from 'vue';
+import type { BrowserMonitor } from '@observe/browser';
 
 const replayErrorBufferTest = inject<boolean>('monitorReplayErrorBufferTest', false);
+const issueRegressionRunId = new URLSearchParams(location.search).get('issueRegression');
+const monitor = inject<BrowserMonitor['client']>('monitorClient');
+const businessAnalyticsEnabled = inject<boolean>('monitorBusinessAnalyticsEnabled', false);
+const monitorApiOrigin = inject<string>('monitorApiOrigin', 'http://localhost:8080');
+const businessDemoUrl = new URL(location.href);
+businessDemoUrl.searchParams.set('businessAnalytics', '1');
+
+function businessClick() {
+  monitor?.track('register_click', { source: 'sdk_demo', button_id: 'register_entry' });
+}
+
+function identifyBusinessUser() {
+  monitor?.identify('demo-business-user');
+  monitor?.page({ name: 'sdk_demo', properties: { source: 'identified_demo' } });
+}
 
 function jsError() {
+  if (issueRegressionRunId) {
+    throw new Error(`issue regression probe ${issueRegressionRunId}`);
+  }
   const value: any = undefined;
   value.profile.name = 'boom';
 }
@@ -17,7 +36,7 @@ async function apiError() {
 }
 
 async function traceApiProbe() {
-  await fetch('http://localhost:8080/admin/info');
+  await fetch(`${monitorApiOrigin}/admin/info`);
 }
 
 function vueError() {
@@ -48,6 +67,17 @@ function replayErrorProbe() {
       Replay 脱敏输入
       <input placeholder="这里的输入会被 mask" />
     </label>
+    <section>
+      <h2>业务数据上报</h2>
+      <template v-if="businessAnalyticsEnabled">
+        <p>页面访问和可见停留时长自动上报；点击下面按钮后，可在管理后台“业务分析”查看。</p>
+        <div class="actions">
+          <button @click="businessClick">上报注册入口点击</button>
+          <button @click="identifyBusinessUser">识别演示用户并记录页面</button>
+        </div>
+      </template>
+      <a v-else :href="businessDemoUrl.href">开启业务分析演示</a>
+    </section>
     <section data-monitor-block class="secret">
       该区域会被 Replay 完全屏蔽
     </section>

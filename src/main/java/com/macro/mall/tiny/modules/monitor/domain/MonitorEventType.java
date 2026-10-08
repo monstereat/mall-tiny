@@ -4,5 +4,8 @@ public enum MonitorEventType {
     ERROR,
     PERFORMANCE,
     BEHAVIOR,
-    REPLAY
+    REPLAY,
+    METRIC,
+    PROFILE,
+    SPAN
 }

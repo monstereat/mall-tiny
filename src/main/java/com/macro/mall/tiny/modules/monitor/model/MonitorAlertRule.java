@@ -24,6 +24,7 @@ public class MonitorAlertRule implements Serializable {
     private Integer cooldownSeconds;
     private String level;
     private String webhookUrl;
+    private Long notificationRouteId;
     private Integer enabled;
     private Date createTime;
     private Date updateTime;

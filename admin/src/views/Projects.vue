@@ -54,6 +54,23 @@ async function updateMemberRole(member: MonitorProjectMember, role: 'MEMBER' | '
   }
 }
 
+async function transferOwner(member: MonitorProjectMember) {
+  try {
+    await ElMessageBox.confirm(
+      `将项目 Owner 转移给管理员 ${member.adminId}？当前 Owner 将降为普通成员。`,
+      '转移项目 Owner',
+      { confirmButtonText: '确认转移', cancelButtonText: '取消', type: 'warning' }
+    );
+    await monitorApi.transferProjectOwner(memberProjectKey.value, member.adminId);
+    memberDialog.value = false;
+    members.value = [];
+    ElMessage.success('项目 Owner 已转移');
+  } catch (e) {
+    if (e === 'cancel' || e === 'close') return;
+    ElMessage.error(e instanceof Error ? e.message : '转移 Owner 失败');
+  }
+}
+
 async function removeMember(member: MonitorProjectMember) {
   try {
     await ElMessageBox.confirm(`移除管理员 ${member.adminId} 的项目访问权限？`, '移除成员');
@@ -162,9 +179,12 @@ async function rotate(projectKey: string) {
             </el-select>
           </template>
         </el-table-column>
-        <el-table-column label="操作" width="100">
+        <el-table-column label="操作" width="190">
           <template #default="{ row }">
-            <el-button v-if="row.role !== 'OWNER'" link type="danger" @click="removeMember(row)">移除</el-button>
+            <template v-if="row.role !== 'OWNER'">
+              <el-button link type="warning" @click="transferOwner(row)">转移 Owner</el-button>
+              <el-button link type="danger" @click="removeMember(row)">移除</el-button>
+            </template>
           </template>
         </el-table-column>
       </el-table>

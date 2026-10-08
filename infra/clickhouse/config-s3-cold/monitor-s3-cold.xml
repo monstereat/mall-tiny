@@ -1,0 +1,26 @@
+<clickhouse>
+    <storage_configuration>
+        <disks>
+            <s3_cold>
+                <type>s3</type>
+                <endpoint from_env="CLICKHOUSE_S3_ENDPOINT" />
+                <access_key_id from_env="CLICKHOUSE_S3_ACCESS_KEY_ID" />
+                <secret_access_key from_env="CLICKHOUSE_S3_SECRET_ACCESS_KEY" />
+                <metadata_path>/var/lib/clickhouse/disks/s3_cold/</metadata_path>
+            </s3_cold>
+        </disks>
+        <policies>
+            <monitor_hot_cold>
+                <volumes>
+                    <default>
+                        <disk>default</disk>
+                    </default>
+                    <cold>
+                        <disk>s3_cold</disk>
+                        <prefer_not_to_merge>true</prefer_not_to_merge>
+                    </cold>
+                </volumes>
+            </monitor_hot_cold>
+        </policies>
+    </storage_configuration>
+</clickhouse>

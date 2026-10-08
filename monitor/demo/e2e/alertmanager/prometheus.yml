@@ -1,0 +1,30 @@
+global:
+  scrape_interval: 1s
+  evaluation_interval: 1s
+
+rule_files:
+  - /etc/prometheus/rules/*.yml
+  - /etc/prometheus/e2e-rules/*.yml
+
+alerting:
+  alertmanagers:
+    - static_configs:
+        - targets: ["alertmanager:9093"]
+
+scrape_configs:
+  - job_name: prometheus
+    static_configs:
+      - targets: ["prometheus:9090"]
+
+  - job_name: observability-platform
+    metrics_path: /actuator/prometheus
+    static_configs:
+      - targets: ["server:8081"]
+
+  - job_name: clickhouse
+    static_configs:
+      - targets: ["clickhouse:9363"]
+
+  - job_name: e2e-alert-receiver
+    static_configs:
+      - targets: ["e2e-alert-receiver:8080"]

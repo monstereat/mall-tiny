@@ -10,4 +10,5 @@ public class MonitorProjectRequest {
     @NotBlank
     private String projectKey;
     private String platform = "web";
+    private Long teamId;
 }

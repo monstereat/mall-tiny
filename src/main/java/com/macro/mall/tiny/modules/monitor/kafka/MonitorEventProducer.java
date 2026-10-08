@@ -28,6 +28,15 @@ public class MonitorEventProducer {
     @Value("${monitor.kafka.topics.replay}")
     private String replayTopic;
 
+    @Value("${monitor.kafka.topics.metric}")
+    private String metricTopic;
+
+    @Value("${monitor.kafka.topics.profile}")
+    private String profileTopic;
+
+    @Value("${monitor.kafka.topics.span:monitor-span-v1}")
+    private String spanTopic;
+
     public void publish(MonitorEventEnvelope event) {
         try {
             kafkaTemplate.send(resolveTopic(event.getEventType()), event.getProjectId(), objectMapper.writeValueAsString(event));
@@ -42,6 +51,9 @@ public class MonitorEventProducer {
             case PERFORMANCE -> performanceTopic;
             case BEHAVIOR -> behaviorTopic;
             case REPLAY -> replayTopic;
+            case METRIC -> metricTopic;
+            case PROFILE -> profileTopic;
+            case SPAN -> spanTopic;
         };
     }
 }

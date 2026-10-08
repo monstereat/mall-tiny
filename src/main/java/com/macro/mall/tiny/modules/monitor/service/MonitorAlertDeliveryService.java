@@ -1,26 +1,28 @@
 package com.macro.mall.tiny.modules.monitor.service;
 
+import com.baomidou.mybatisplus.core.toolkit.Wrappers;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.macro.mall.tiny.modules.monitor.mapper.MonitorAlertDeliveryMapper;
 import com.macro.mall.tiny.modules.monitor.mapper.MonitorAlertRecordMapper;
 import com.macro.mall.tiny.modules.monitor.mapper.MonitorAlertRuleMapper;
 import com.macro.mall.tiny.modules.monitor.mapper.MonitorProjectMapper;
 import com.macro.mall.tiny.modules.monitor.model.MonitorAlertDelivery;
+import com.macro.mall.tiny.modules.monitor.model.MonitorAlertDeliveryEntity;
 import com.macro.mall.tiny.modules.monitor.model.MonitorAlertRecord;
 import com.macro.mall.tiny.modules.monitor.model.MonitorAlertRule;
 import com.macro.mall.tiny.modules.monitor.model.MonitorProject;
 import lombok.RequiredArgsConstructor;
 import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.data.redis.core.ZSetOperations;
-import org.springframework.http.MediaType;
-import org.springframework.http.client.SimpleClientHttpRequestFactory;
 import org.springframework.scheduling.annotation.Scheduled;
+import org.springframework.dao.DataAccessException;
 import org.springframework.stereotype.Service;
 import org.springframework.util.StringUtils;
-import org.springframework.web.client.RestClient;
 
 import java.time.Duration;
-import java.util.ArrayList;
+import java.util.Comparator;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -31,46 +33,87 @@ import java.util.UUID;
 public class MonitorAlertDeliveryService {
 
     private static final Duration RETENTION = Duration.ofDays(90);
-    private static final Duration CONNECT_TIMEOUT = Duration.ofSeconds(3);
-    private static final Duration READ_TIMEOUT = Duration.ofSeconds(5);
+    private static final Duration CLAIM_LEASE = Duration.ofSeconds(60);
     private static final int MAX_ATTEMPTS = 6;
 
     private final StringRedisTemplate redisTemplate;
     private final ObjectMapper objectMapper;
+    private final MonitorAlertDeliveryMapper deliveryMapper;
     private final MonitorAlertRuleMapper ruleMapper;
     private final MonitorAlertRecordMapper recordMapper;
     private final MonitorProjectMapper projectMapper;
+    private final MonitorAlertNotificationRouteService notificationRouteService;
+    private final MonitorAlertNotificationSender notificationSender;
 
     public void send(MonitorAlertRule rule, MonitorAlertRecord alert,
                      MonitorProject project, String alertStatus) {
         long now = System.currentTimeMillis();
+        String destination = destination(rule, project);
         MonitorAlertDelivery delivery = new MonitorAlertDelivery(
                 UUID.randomUUID().toString(), project.getId(), rule.getId(), alert.getId(),
-                alertStatus, StringUtils.hasText(rule.getWebhookUrl()) ? "pending" : "skipped",
+                alertStatus, StringUtils.hasText(destination) ? "pending" : "skipped",
                 0, 0, now, now, null);
         save(delivery);
         if ("pending".equals(delivery.status())) {
-            attempt(delivery, rule, alert, project);
+            if (claim(delivery.id(), now)) {
+                attempt(get(delivery.id()), rule, alert, project);
+            }
         }
     }
 
     public List<MonitorAlertDelivery> list(Long projectId) {
-        ZSetOperations<String, String> index = redisTemplate.opsForZSet();
-        String key = indexKey(projectId);
-        index.removeRangeByScore(key, 0, System.currentTimeMillis() - RETENTION.toMillis());
-        Set<String> ids = index.reverseRangeByScore(
-                key, 0, Double.POSITIVE_INFINITY, 0, 200);
-        List<MonitorAlertDelivery> result = new ArrayList<>();
-        if (ids == null) {
-            return result;
-        }
-        for (String id : ids) {
-            MonitorAlertDelivery delivery = get(id);
-            if (delivery != null) {
-                result.add(delivery);
+        long cutoff = System.currentTimeMillis() - RETENTION.toMillis();
+        Map<String, MonitorAlertDelivery> deliveries = new LinkedHashMap<>();
+        deliveryMapper.selectList(Wrappers.<MonitorAlertDeliveryEntity>lambdaQuery()
+                        .eq(MonitorAlertDeliveryEntity::getProjectId, projectId)
+                        .ge(MonitorAlertDeliveryEntity::getCreatedAt, cutoff)
+                        .orderByDesc(MonitorAlertDeliveryEntity::getCreatedAt)
+                        .last("LIMIT 200"))
+                .stream().map(this::toDelivery).forEach(delivery -> deliveries.put(delivery.id(), delivery));
+        try {
+            ZSetOperations<String, String> index = redisTemplate.opsForZSet();
+            String legacyIndex = indexKey(projectId);
+            index.removeRangeByScore(legacyIndex, 0, cutoff);
+            Set<String> legacyIds = index.reverseRangeByScore(legacyIndex, cutoff, Double.POSITIVE_INFINITY, 0, 200);
+            if (legacyIds != null) {
+                for (String id : legacyIds) {
+                    if (!deliveries.containsKey(id)) {
+                        MonitorAlertDelivery legacy = get(id);
+                        if (legacy != null) deliveries.put(id, legacy);
+                    }
+                }
             }
+        } catch (DataAccessException ignored) {
+            // MySQL is authoritative; keep durable history available during Redis outages.
         }
-        return result;
+        return deliveries.values().stream()
+                .filter(delivery -> delivery.createdAt() >= cutoff)
+                .sorted(Comparator.comparingLong(MonitorAlertDelivery::createdAt).reversed())
+                .limit(200).toList();
+    }
+
+    public boolean hasDelivery(Long alertRecordId) {
+        Long count = deliveryMapper.selectCount(Wrappers.<MonitorAlertDeliveryEntity>lambdaQuery()
+                .eq(MonitorAlertDeliveryEntity::getAlertRecordId, alertRecordId));
+        return count != null && count > 0;
+    }
+
+    @Scheduled(fixedDelayString = "${monitor.alert.delivery-recovery-interval-ms:10000}")
+    public void recoverPendingRetries() {
+        long now = System.currentTimeMillis();
+        List<MonitorAlertDeliveryEntity> due = deliveryMapper.selectRecoverable(now);
+        if (due.isEmpty()) return;
+        ZSetOperations<String, String> retries = redisTemplate.opsForZSet();
+        for (MonitorAlertDeliveryEntity delivery : due) {
+            long dueAt = "sending".equals(delivery.getStatus()) ? now : delivery.getNextAttemptAt();
+            retries.add(retryKey(), delivery.getId(), (double) dueAt);
+        }
+        redisTemplate.expire(retryKey(), RETENTION);
+    }
+
+    @Scheduled(fixedDelayString = "${monitor.alert.delivery-cleanup-interval-ms:3600000}")
+    public void purgeExpiredDeliveries() {
+        deliveryMapper.deleteExpired(System.currentTimeMillis() - RETENTION.toMillis());
     }
 
     @Scheduled(fixedDelayString = "${monitor.alert.delivery-retry-interval-ms:5000}")
@@ -86,10 +129,11 @@ public class MonitorAlertDeliveryService {
             if (!Long.valueOf(1).equals(claimed)) {
                 continue;
             }
-            MonitorAlertDelivery delivery = get(id);
-            if (delivery == null || !"pending".equals(delivery.status())) {
+            if (!claim(id, now)) {
                 continue;
             }
+            MonitorAlertDelivery delivery = get(id);
+            if (delivery == null) continue;
             MonitorAlertRule rule = ruleMapper.selectById(delivery.ruleId());
             MonitorAlertRecord alert = recordMapper.selectById(delivery.alertRecordId());
             MonitorProject project = projectMapper.selectById(delivery.projectId());
@@ -106,25 +150,26 @@ public class MonitorAlertDeliveryService {
                          MonitorAlertRecord alert, MonitorProject project) {
         int attempts = delivery.attempts() + 1;
         try {
-            SimpleClientHttpRequestFactory requestFactory = new SimpleClientHttpRequestFactory();
-            requestFactory.setConnectTimeout(CONNECT_TIMEOUT);
-            requestFactory.setReadTimeout(READ_TIMEOUT);
-            RestClient.builder().requestFactory(requestFactory).build().post()
-                    .uri(rule.getWebhookUrl())
-                    .contentType(MediaType.APPLICATION_JSON)
-                    .body(Map.of(
-                            "project", project.getProjectKey(),
-                            "rule", rule.getName(),
-                            "level", rule.getLevel(),
-                            "metric", rule.getMetric(),
-                            "value", alert.getMetricValue(),
-                            "threshold", alert.getThresholdValue(),
-                            "status", delivery.alertStatus(),
-                            "message", alert.getMessage()
-                    ))
-                    .retrieve()
-                    .toBodilessEntity();
+            String destination = destination(rule, project);
+            if (!StringUtils.hasText(destination)) {
+                save(copy(delivery, "skipped", attempts, 0, null));
+                return;
+            }
+            notificationSender.send(project.getTenantId(), destination, Map.of(
+                    "deliveryId", delivery.id(),
+                    "project", project.getProjectKey(),
+                    "rule", rule.getName(),
+                    "level", rule.getLevel(),
+                    "metric", rule.getMetric(),
+                    "value", alert.getMetricValue(),
+                    "threshold", alert.getThresholdValue(),
+                    "status", delivery.alertStatus(),
+                    "message", alert.getMessage()
+            ));
             save(copy(delivery, "delivered", attempts, 0, null));
+        } catch (MonitorAlertWebhookClient.UnsafeTargetException
+                 | MonitorAlertNotificationSender.DestinationRejectedException e) {
+            save(copy(delivery, "failed", attempts, 0, "webhook destination rejected"));
         } catch (RuntimeException ignored) {
             if (attempts >= MAX_ATTEMPTS) {
                 save(copy(delivery, "failed", attempts, 0, "webhook delivery failed"));
@@ -138,6 +183,13 @@ public class MonitorAlertDeliveryService {
         }
     }
 
+    private String destination(MonitorAlertRule rule, MonitorProject project) {
+        if (rule.getNotificationRouteId() != null) {
+            return notificationRouteService.resolveUrl(project, rule.getNotificationRouteId());
+        }
+        return rule.getWebhookUrl();
+    }
+
     private MonitorAlertDelivery copy(MonitorAlertDelivery source, String status,
                                       int attempts, long nextAttemptAt, String lastError) {
         return new MonitorAlertDelivery(source.id(), source.projectId(), source.ruleId(),
@@ -146,27 +198,67 @@ public class MonitorAlertDeliveryService {
     }
 
     private void save(MonitorAlertDelivery delivery) {
-        try {
-            redisTemplate.opsForValue().set(recordKey(delivery.id()),
-                    objectMapper.writeValueAsString(delivery), RETENTION);
-            String index = indexKey(delivery.projectId());
-            redisTemplate.opsForZSet().add(index, delivery.id(), delivery.createdAt());
-            redisTemplate.expire(index, RETENTION);
-        } catch (JsonProcessingException e) {
-            throw new IllegalStateException("alert delivery serialization failed", e);
+        MonitorAlertDeliveryEntity entity = toEntity(delivery);
+        if (deliveryMapper.selectById(delivery.id()) == null) {
+            deliveryMapper.insert(entity);
+        } else {
+            deliveryMapper.updateById(entity);
         }
     }
 
     private MonitorAlertDelivery get(String id) {
-        String value = redisTemplate.opsForValue().get(recordKey(id));
-        if (value == null) {
+        MonitorAlertDeliveryEntity delivery = deliveryMapper.selectById(id);
+        if (delivery != null) return toDelivery(delivery);
+        String legacy;
+        try {
+            legacy = redisTemplate.opsForValue().get(recordKey(id));
+        } catch (DataAccessException ignored) {
             return null;
         }
+        if (legacy == null) return null;
         try {
-            return objectMapper.readValue(value, MonitorAlertDelivery.class);
+            return objectMapper.readValue(legacy, MonitorAlertDelivery.class);
         } catch (JsonProcessingException e) {
-            throw new IllegalStateException("alert delivery deserialization failed", e);
+            throw new IllegalStateException("legacy alert delivery deserialization failed", e);
         }
+    }
+
+    private MonitorAlertDeliveryEntity toEntity(MonitorAlertDelivery delivery) {
+        MonitorAlertDeliveryEntity entity = new MonitorAlertDeliveryEntity();
+        entity.setId(delivery.id());
+        entity.setProjectId(delivery.projectId());
+        entity.setRuleId(delivery.ruleId());
+        entity.setAlertRecordId(delivery.alertRecordId());
+        entity.setAlertStatus(delivery.alertStatus());
+        entity.setStatus(delivery.status());
+        entity.setAttempts(delivery.attempts());
+        entity.setNextAttemptAt(delivery.nextAttemptAt());
+        entity.setClaimUntil(0L);
+        entity.setCreatedAt(delivery.createdAt());
+        entity.setUpdatedAt(delivery.updatedAt());
+        entity.setLastError(delivery.lastError());
+        return entity;
+    }
+
+    private MonitorAlertDelivery toDelivery(MonitorAlertDeliveryEntity entity) {
+        return new MonitorAlertDelivery(entity.getId(), entity.getProjectId(), entity.getRuleId(),
+                entity.getAlertRecordId(), entity.getAlertStatus(), entity.getStatus(),
+                entity.getAttempts() == null ? 0 : entity.getAttempts(),
+                entity.getNextAttemptAt() == null ? 0 : entity.getNextAttemptAt(),
+                entity.getCreatedAt(), entity.getUpdatedAt(), entity.getLastError());
+    }
+
+    private String retryKey() {
+        return "monitor:alert:delivery:retry";
+    }
+
+    private boolean claim(String id, long now) {
+        if (deliveryMapper.selectById(id) == null) {
+            MonitorAlertDelivery legacy = get(id);
+            if (legacy == null) return false;
+            save(legacy);
+        }
+        return deliveryMapper.claim(id, now, now + CLAIM_LEASE.toMillis()) == 1;
     }
 
     private String recordKey(String id) {
@@ -175,9 +267,5 @@ public class MonitorAlertDeliveryService {
 
     private String indexKey(Long projectId) {
         return "monitor:alert:delivery:index:" + projectId;
-    }
-
-    private String retryKey() {
-        return "monitor:alert:delivery:retry";
     }
 }
