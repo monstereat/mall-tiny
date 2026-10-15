@@ -28,6 +28,10 @@ import java.util.Map;
 import java.util.Set;
 import java.util.UUID;
 
+/**
+ * 负责把告警消息发到外部 Webhook，并记录发送结果。
+ * MySQL 保存每条消息的状态；Redis 有序集合只用来安排“什么时候重试”。服务重启后可从 MySQL 找回未完成的消息。
+ */
 @Service
 @RequiredArgsConstructor
 public class MonitorAlertDeliveryService {
@@ -53,6 +57,7 @@ public class MonitorAlertDeliveryService {
                 UUID.randomUUID().toString(), project.getId(), rule.getId(), alert.getId(),
                 alertStatus, StringUtils.hasText(destination) ? "pending" : "skipped",
                 0, 0, now, now, null);
+        // 先把“待发送/跳过”状态写进 MySQL，再请求外部地址；即使进程中途退出，仍能找到这条消息继续处理。
         save(delivery);
         if ("pending".equals(delivery.status())) {
             if (claim(delivery.id(), now)) {
@@ -64,6 +69,7 @@ public class MonitorAlertDeliveryService {
     public List<MonitorAlertDelivery> list(Long projectId) {
         long cutoff = System.currentTimeMillis() - RETENTION.toMillis();
         Map<String, MonitorAlertDelivery> deliveries = new LinkedHashMap<>();
+        // 以 MySQL 中的记录为准；同时读取旧版本只写在 Redis 里的记录，兼容升级前的数据。
         deliveryMapper.selectList(Wrappers.<MonitorAlertDeliveryEntity>lambdaQuery()
                         .eq(MonitorAlertDeliveryEntity::getProjectId, projectId)
                         .ge(MonitorAlertDeliveryEntity::getCreatedAt, cutoff)
@@ -100,6 +106,7 @@ public class MonitorAlertDeliveryService {
 
     @Scheduled(fixedDelayString = "${monitor.alert.delivery-recovery-interval-ms:10000}")
     public void recoverPendingRetries() {
+        // 定期从数据库找回待发送、或“发送中”占用时间已到的消息，补上重启或队列记录丢失留下的空档。
         long now = System.currentTimeMillis();
         List<MonitorAlertDeliveryEntity> due = deliveryMapper.selectRecoverable(now);
         if (due.isEmpty()) return;
@@ -113,11 +120,13 @@ public class MonitorAlertDeliveryService {
 
     @Scheduled(fixedDelayString = "${monitor.alert.delivery-cleanup-interval-ms:3600000}")
     public void purgeExpiredDeliveries() {
+        // 发送历史保留 90 天；数据库历史和 Redis 中的重试时间表分别清理。
         deliveryMapper.deleteExpired(System.currentTimeMillis() - RETENTION.toMillis());
     }
 
     @Scheduled(fixedDelayString = "${monitor.alert.delivery-retry-interval-ms:5000}")
     public void retryPending() {
+        // Redis 有序集合按重试时间排序；每轮最多取 100 条，避免后台定时任务同时发出太多网络请求。
         long now = System.currentTimeMillis();
         ZSetOperations<String, String> retries = redisTemplate.opsForZSet();
         Set<String> ids = retries.rangeByScore(retryKey(), 0, now, 0, 100);
@@ -125,6 +134,7 @@ public class MonitorAlertDeliveryService {
             return;
         }
         for (String id : ids) {
+            // 先从 Redis 取到期消息，再在数据库申请一个有时限的处理权，避免多个服务实例重复发送同一条。
             Long claimed = retries.remove(retryKey(), id);
             if (!Long.valueOf(1).equals(claimed)) {
                 continue;
@@ -148,6 +158,7 @@ public class MonitorAlertDeliveryService {
 
     private void attempt(MonitorAlertDelivery delivery, MonitorAlertRule rule,
                          MonitorAlertRecord alert, MonitorProject project) {
+        // attempts 是发送次数；本次发送后的成功/失败状态会写回同一条记录。
         int attempts = delivery.attempts() + 1;
         try {
             String destination = destination(rule, project);
@@ -175,6 +186,7 @@ public class MonitorAlertDeliveryService {
                 save(copy(delivery, "failed", attempts, 0, "webhook delivery failed"));
                 return;
             }
+            // 暂时性失败会逐步拉长等待时间，并受最大等待时间限制；目标地址校验失败则不再重试。
             long delaySeconds = Math.min(300, 5L << Math.min(attempts - 1, 5));
             long nextAttemptAt = System.currentTimeMillis() + delaySeconds * 1000L;
             save(copy(delivery, "pending", attempts, nextAttemptAt, "webhook delivery failed"));
@@ -184,6 +196,7 @@ public class MonitorAlertDeliveryService {
     }
 
     private String destination(MonitorAlertRule rule, MonitorProject project) {
+        // 新规则从租户共享的通知地址配置中取 URL；旧规则仍可直接使用自己保存的 webhookUrl。
         if (rule.getNotificationRouteId() != null) {
             return notificationRouteService.resolveUrl(project, rule.getNotificationRouteId());
         }
@@ -198,6 +211,7 @@ public class MonitorAlertDeliveryService {
     }
 
     private void save(MonitorAlertDelivery delivery) {
+        // 用投递编号找到记录：尚无记录就新增，已有记录就更新状态。
         MonitorAlertDeliveryEntity entity = toEntity(delivery);
         if (deliveryMapper.selectById(delivery.id()) == null) {
             deliveryMapper.insert(entity);
@@ -253,6 +267,7 @@ public class MonitorAlertDeliveryService {
     }
 
     private boolean claim(String id, long now) {
+        // claim_until 是处理权的截止时间；某个服务实例崩溃后，其他实例可在截止时间过后接手。
         if (deliveryMapper.selectById(id) == null) {
             MonitorAlertDelivery legacy = get(id);
             if (legacy == null) return false;

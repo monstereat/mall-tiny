@@ -29,6 +29,10 @@ import java.util.HexFormat;
 import java.util.List;
 import java.util.Map;
 
+/**
+ * 管理监控项目的上报密钥、上传密钥和脱敏配置。
+ * Spring 会把此类作为业务服务，并把它需要的其他服务传进来；数据库只存密钥摘要（不可直接还原的校验值），明文密钥只在创建或更换时返回一次。
+ */
 @Service
 @RequiredArgsConstructor
 public class MonitorProjectService {
@@ -42,6 +46,7 @@ public class MonitorProjectService {
     private final ObjectMapper objectMapper;
     private final SecureRandom secureRandom = new SecureRandom();
 
+    /** 创建项目并生成事件上报、源码上传两把不同的密钥；事务保证项目和所有者关系要么都保存，要么都不保存。 */
     @Transactional
     public MonitorProjectCredentials create(MonitorProjectRequest request) {
         MonitorProject exists = projectMapper.selectOne(
@@ -74,6 +79,7 @@ public class MonitorProjectService {
         return new MonitorProjectCredentials(project, ingestKey, releaseKey);
     }
 
+    /** 同时更换两把密钥；数据库只更新校验值，调用方这次才能拿到新密钥明文。 */
     @Transactional
     public MonitorProjectCredentials rotateKeys(String projectKey) {
         MonitorProject project = requireActiveProject(projectKey);
@@ -86,12 +92,14 @@ public class MonitorProjectService {
         return new MonitorProjectCredentials(project, ingestKey, releaseKey);
     }
 
+    /** 接收事件时调用：先找出已启用项目，再核对请求带来的密钥。 */
     public MonitorProject validateIngestKey(String projectKey, String rawIngestKey) {
         MonitorProject project = requireActiveProject(projectKey);
         validateKey(rawIngestKey, project.getIngestKeyHash(), "ingest");
         return project;
     }
 
+    /** 上传版本和源码映射文件时调用；使用独立密钥，不能拿事件上报密钥代替。 */
     public MonitorProject validateReleaseKey(String projectKey, String rawReleaseKey) {
         MonitorProject project = requireActiveProject(projectKey);
         validateKey(rawReleaseKey, project.getReleaseKeyHash(), "release");
@@ -176,6 +184,7 @@ public class MonitorProjectService {
 
     public MonitorProject getActiveProject(String projectKey) {
         String cacheKey = cacheKey(projectKey);
+        // 先查 Redis 缓存的项目摘要和脱敏设置，减少高频上报时反复读取 MySQL。
         String cached = redisTemplate.opsForValue().get(cacheKey);
         if (StringUtils.hasText(cached)) {
             String[] parts = cached.split("\\|", -1);
@@ -196,6 +205,7 @@ public class MonitorProjectService {
             }
         }
 
+        // 缓存里没有时再查 MySQL；只有启用的项目会重新放入缓存。
         MonitorProject project = projectMapper.selectOne(
                 Wrappers.<MonitorProject>lambdaQuery()
                         .eq(MonitorProject::getProjectKey, projectKey)
@@ -233,12 +243,14 @@ public class MonitorProjectService {
         if (!StringUtils.hasText(rawKey)) {
             throw new ResponseStatusException(HttpStatus.UNAUTHORIZED, "missing monitor " + keyType + " key");
         }
+        // 不保存明文密钥；比较两个摘要时固定完成整段比较，避免发现开头不同就提前返回。
         if (!constantTimeEquals(expectedHash, sha256(rawKey))) {
             throw new ResponseStatusException(HttpStatus.UNAUTHORIZED, "invalid monitor " + keyType + " key");
         }
     }
 
     private String generateKey() {
+        // SecureRandom 生成难以猜测的密钥；前缀只帮助人分辨它用于事件上报还是文件上传。
         byte[] bytes = new byte[24];
         secureRandom.nextBytes(bytes);
         return "mon_" + HexFormat.of().formatHex(bytes);
@@ -260,6 +272,7 @@ public class MonitorProjectService {
         if (left == null || right == null) {
             return false;
         }
+        // 使用 JDK 提供的完整摘要比较方法，不因前几个字符不同就提前结束比较。
         return MessageDigest.isEqual(
                 left.getBytes(StandardCharsets.UTF_8),
                 right.getBytes(StandardCharsets.UTF_8)

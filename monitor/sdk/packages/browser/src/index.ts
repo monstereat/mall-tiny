@@ -178,6 +178,7 @@ function canPropagateTrace(url: string, mode: BrowserMonitorOptions['tracePropag
   }
 }
 
+/** 安装浏览器采集钩子，并统一维护页面、网络请求、错误与面包屑的生命周期。 */
 export function init(options: BrowserMonitorOptions): BrowserMonitor {
   const host = window;
   const activeMonitor = activeMonitors.get(host);
@@ -227,6 +228,7 @@ export function init(options: BrowserMonitorOptions): BrowserMonitor {
   };
 
   if (trackPages) {
+    // 初始访问与后续 SPA 路由共用页面入口；查询参数会被移除，只保留路由 hash。
     const referrer = document.referrer ? sanitizeRouteUrl(document.referrer) : undefined;
     startPage(currentPageUrl, referrer);
   }
@@ -242,6 +244,7 @@ export function init(options: BrowserMonitorOptions): BrowserMonitor {
   }));
 
   if (options.captureErrors !== false) {
+    // 错误事件携带发生前的面包屑快照，供 Issue 定位时还原用户操作上下文。
     const errorHandler = (event: ErrorEvent | Event): void => {
       if (event instanceof ErrorEvent && event.error) {
         client.capture({
@@ -387,6 +390,7 @@ export function init(options: BrowserMonitorOptions): BrowserMonitor {
 
     window.fetch = async (...args: Parameters<typeof fetch>): Promise<Response> => {
       const url = requestUrl(args[0]);
+      // 不采集 SDK 自己的 Ingest 请求，避免形成递归上报和噪声。
       if (isIngestUrl(url, ingestPrefix)) {
         return originalFetch(...args);
       }
@@ -396,6 +400,7 @@ export function init(options: BrowserMonitorOptions): BrowserMonitor {
       const existingParent = requestHeaders.get('traceparent');
       const hasExistingParent = requestHeaders.has('traceparent');
       const propagateTrace = canPropagateTrace(url, options.tracePropagation);
+      // 先解析调用方的 Trace；是否向目标请求写入子 Span 头由目标域策略控制。
       const inheritedParent = parseTraceparent(existingParent);
       const traceId = inheritedParent?.traceId ?? newTraceId();
       const spanId = newSpanId();
@@ -488,6 +493,7 @@ export function init(options: BrowserMonitorOptions): BrowserMonitor {
   }
 
   if (options.captureXhr !== false && typeof XMLHttpRequest !== 'undefined') {
+    // XHR 与 Fetch 共用 Trace 规则；WeakMap 保存请求状态，避免改写 XHR 实例对外可见字段。
     const originalOpen = XMLHttpRequest.prototype.open;
     const originalSend = XMLHttpRequest.prototype.send;
     const originalSetRequestHeader = XMLHttpRequest.prototype.setRequestHeader;
@@ -732,6 +738,7 @@ export function init(options: BrowserMonitorOptions): BrowserMonitor {
   cleanup.push(() => window.removeEventListener('online', onlineHandler));
 
   const pageHideHandler = (): void => {
+    // 页面即将离开时使用 keepalive 尽量送出队列，失败项仍由核心队列持久化。
     void client.flush(true).catch(() => undefined);
   };
   window.addEventListener('pagehide', pageHideHandler);
@@ -743,6 +750,7 @@ export function init(options: BrowserMonitorOptions): BrowserMonitor {
     async destroy(): Promise<void> {
       if (destroyed) return;
       destroyed = true;
+      // 恢复被包装的浏览器 API 后关闭 Client，防止重复安装和遗留定时器。
       cleanup.forEach(fn => {
         try {
           fn();

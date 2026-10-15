@@ -24,6 +24,10 @@ import java.util.Date;
 import java.util.List;
 import java.util.UUID;
 
+/**
+ * 判断告警规则现在应该处于什么状态：条件满足并持续一段时间后触发，条件恢复后关闭告警。
+ * {@code @Scheduled} 表示由 Spring 后台定时调用；新事件到达时，也会由事件消费者立即检查相关规则。
+ */
 @Service
 @RequiredArgsConstructor
 public class MonitorAlertEngine {
@@ -39,6 +43,8 @@ public class MonitorAlertEngine {
     private final StringRedisTemplate redisTemplate;
 
     public void evaluate(MonitorProject project, MonitorEventEnvelope event, String fingerprint) {
+        // 每条事件处理时会调用这里，只检查当前项目启用的规则，不扫描所有项目。
+        // 日志类规则使用另一种查询方式，问题新建/复发通知也有独立流程，不在这里重复处理。
         List<MonitorAlertRule> rules = ruleMapper.selectList(
                 Wrappers.<MonitorAlertRule>lambdaQuery()
                         .eq(MonitorAlertRule::getProjectId, project.getId())
@@ -52,6 +58,7 @@ public class MonitorAlertEngine {
     }
 
     @Scheduled(fixedDelayString = "${monitor.alert.evaluation-interval-ms:1000}")
+    /** 定时再检查事件类规则；即使之后没有新事件，也能在条件持续时间达到后触发告警。 */
     public void evaluateActiveRules() {
         List<MonitorAlertRule> rules = ruleMapper.selectList(
                 Wrappers.<MonitorAlertRule>lambdaQuery().eq(MonitorAlertRule::getEnabled, 1)
@@ -67,6 +74,7 @@ public class MonitorAlertEngine {
     }
 
     @Scheduled(fixedDelayString = "${monitor.alert.logs-evaluation-interval-ms:30000}")
+    /** 日志查询比较耗时，所以单独低频运行；Redis 锁保证多个服务实例不会同时查同一条规则。 */
     public void evaluateLogErrorRules() {
         List<MonitorAlertRule> rules = ruleMapper.selectList(
                 Wrappers.<MonitorAlertRule>lambdaQuery().eq(MonitorAlertRule::getEnabled, 1)
@@ -97,6 +105,7 @@ public class MonitorAlertEngine {
     }
 
     private void recordObservation(MonitorAlertRule rule, MonitorEventEnvelope event) {
+        // 错误数和接口失败数按发生时间存入 Redis，并删除窗口之外的旧记录，只统计最近一段时间。
         if (("error_count".equalsIgnoreCase(rule.getMetric())
                 && event.getEventType() == MonitorEventType.ERROR)
                 || ("api_failure_count".equalsIgnoreCase(rule.getMetric()) && isApiFailure(event))) {
@@ -113,6 +122,7 @@ public class MonitorAlertEngine {
                 && event.getEventType() != MonitorEventType.METRIC) || event.getData() == null) {
             return;
         }
+        // 性能和自定义指标只保留最近一次有效数值；超过规则的时间范围后就当作没有新数据。
         String metricKey = event.getEventType() == MonitorEventType.METRIC ? "name" : "metric";
         String metric = String.valueOf(event.getData().getOrDefault(metricKey, ""));
         if (!rule.getMetric().equalsIgnoreCase(metric)) {
@@ -131,6 +141,7 @@ public class MonitorAlertEngine {
     }
 
     static boolean isApiFailure(MonitorEventEnvelope event) {
+        // 前端把接口请求结果当作行为事件上报：0 代表网络请求失败，HTTP 4xx/5xx 代表服务返回错误。
         if (event == null || event.getEventType() != MonitorEventType.BEHAVIOR || event.getData() == null
                 || !"api".equalsIgnoreCase(String.valueOf(event.getData().get("category")))) {
             return false;
@@ -141,12 +152,14 @@ public class MonitorAlertEngine {
     }
 
     private void evaluateRule(MonitorAlertRule rule, MonitorProject project, String fingerprint, long now) {
+        // Redis 保存规则当前状态：since 记下本轮超标从何时开始，recordId 指向已经触发、等待恢复的告警。
         BigDecimal value = currentValue(rule, now);
         String stateKey = stateKey(rule);
         String sinceValue = (String) redisTemplate.opsForHash().get(stateKey, "since");
         String recordIdValue = (String) redisTemplate.opsForHash().get(stateKey, "recordId");
 
         if (value == null || !matches(value, rule.getOperator(), rule.getThresholdValue())) {
+            // 数值回到正常范围就关闭已触发的告警；还没触发的临时计时也一并清掉。
             if (recordIdValue != null) {
                 recover(rule, project, stateKey, recordIdValue, value);
             } else {
@@ -156,6 +169,7 @@ public class MonitorAlertEngine {
         }
 
         if (sinceValue == null) {
+            // 如果规则要求持续一段时间，第一次超标时只记开始时间，等时间真的够了再触发。
             redisTemplate.opsForHash().put(stateKey, "since", Long.toString(now));
             redisTemplate.opsForHash().put(stateKey, "fingerprint", fingerprint == null ? "" : fingerprint);
             sinceValue = Long.toString(now);
@@ -176,6 +190,7 @@ public class MonitorAlertEngine {
             return;
         }
         try {
+            // 短锁和冷却时间避免多个线程重复建告警；成功后保存告警编号，等条件恢复时更新这条记录。
             if (redisTemplate.opsForHash().hasKey(stateKey, "recordId") || !acquireCooldown(rule)) {
                 return;
             }
@@ -199,6 +214,7 @@ public class MonitorAlertEngine {
     }
 
     private BigDecimal currentValue(MonitorAlertRule rule, long now) {
+        // 数量规则统计最近时间范围内的事件；数值规则读取最近一次观测，过期数据不参与判断。
         if ("error_count".equalsIgnoreCase(rule.getMetric())
                 || "api_failure_count".equalsIgnoreCase(rule.getMetric())) {
             int window = Math.max(60, rule.getWindowSeconds() == null ? 300 : rule.getWindowSeconds());
@@ -229,6 +245,7 @@ public class MonitorAlertEngine {
     }
 
     private boolean matches(BigDecimal value, String operator, BigDecimal threshold) {
+        // 用十进制数比较当前值和阈值，避免小数转成 double 后出现细微误差。
         if (threshold == null) {
             return false;
         }
@@ -254,6 +271,7 @@ public class MonitorAlertEngine {
     }
 
     private boolean acquireFiringLock(MonitorAlertRule rule) {
+        // 给处理权设置短暂截止时间，避免多个线程或服务实例同时为同一规则新建告警。
         Boolean acquired = redisTemplate.opsForValue().setIfAbsent(
                 firingLockKey(rule), UUID.randomUUID().toString(), Duration.ofSeconds(30));
         return Boolean.TRUE.equals(acquired);
@@ -281,6 +299,7 @@ public class MonitorAlertEngine {
 
     private void recover(MonitorAlertRule rule, MonitorProject project, String stateKey,
                          String recordIdValue, BigDecimal recoveredValue) {
+        // 指标恢复正常后更新原告警记录、发送恢复通知，并清除 Redis 里的活动状态。
         MonitorAlertRecord record = recordMapper.selectById(Long.parseLong(recordIdValue));
         if (record != null && "firing".equalsIgnoreCase(record.getStatus())) {
             record.setStatus("resolved");

@@ -34,6 +34,10 @@ import java.util.Objects;
 import java.util.Set;
 import java.util.TreeMap;
 
+/**
+ * 负责为管理端页面查询并组合数据。
+ * MySQL 保存项目和问题汇总，ClickHouse 保存大量原始事件；需要同时用到两边时，先从事件里找错误指纹，再据此查问题汇总。
+ */
 @Service
 public class MonitorQueryService {
 
@@ -41,6 +45,7 @@ public class MonitorQueryService {
     private static final int ISSUE_FILTER_FINGERPRINT_LIMIT = 10_000;
     private static final int ISSUE_QUERY_MAX_LENGTH = 128;
 
+    /** 把 SQL 条件和要填入条件的值放在一起，使用数据库参数传值，避免把用户输入直接拼进 SQL。 */
     private record EventFilter(String clause, Object[] args) {
     }
 
@@ -52,6 +57,7 @@ public class MonitorQueryService {
     private final MonitorAlertRuleMapper alertRuleMapper;
     private final MonitorAlertRecordMapper alertRecordMapper;
 
+    /** ClickHouse 有自己的数据库访问工具；@Qualifier 告诉 Spring 这里要注入哪一个，避免误拿 MySQL 的工具。 */
     public MonitorQueryService(
             @Qualifier("clickHouseJdbcTemplate") JdbcTemplate clickHouse,
             MonitorProjectMapper projectMapper,
@@ -82,6 +88,8 @@ public class MonitorQueryService {
             int hours,
             String environment,
             String release) {
+        // 错误、接口和性能的原始统计来自 ClickHouse；问题状态来自 MySQL 的汇总表。
+        // 项目、时间、环境和版本筛选条件会一致地应用到原始事件查询。
         EventFilter errorFilter = eventFilter(project, hours, environment, release);
         EventFilter performanceFilter = eventFilter(project, hours, environment, release);
         EventFilter behaviorFilter = eventFilter(project, hours, environment, release);
@@ -139,6 +147,8 @@ public class MonitorQueryService {
             String release,
             long pageNum,
             long pageSize) {
+        // 把多种含调用链编号的事件合并查询；先查总条数，再查当前页的数据。
+        // 服务端会限制页码和每页大小，避免 URL 参数让数据库执行过大的查询。
         int safeHours = Math.max(1, Math.min(24 * 365, hours));
         long safePageNum = Math.max(1, pageNum);
         long safePageSize = Math.max(1, Math.min(100, pageSize));
@@ -179,6 +189,8 @@ public class MonitorQueryService {
     }
 
     public List<MonitorTraceSpan> traceSpans(MonitorProject project, String traceId) {
+        // 调用详情从 span_event 读取父调用编号等关系，再按开始时间排序，前端据此画出调用时间线。
+        // 项目和调用编号作为数据库参数传入，确保只查当前项目，也避免把输入拼进 SQL。
         return clickHouse.queryForList(
                         "SELECT trace_id AS traceId,JSONExtractString(payload,'data','spanId') AS spanId," +
                                 "JSONExtractString(payload,'data','parentSpanId') AS parentSpanId," +
@@ -293,6 +305,8 @@ public class MonitorQueryService {
             String sort,
             String queryString,
             String environment) {
+        // 问题表只保存汇总状态，没有每个环境里的原始错误记录。
+        // 按环境或错误文字筛选时，先在 ClickHouse 找到错误指纹，再用这些指纹筛 MySQL 问题表。
         int safeHours = Math.max(1, Math.min(24 * 365, hours));
         Date since = Date.from(Instant.now().minus(safeHours, ChronoUnit.HOURS));
         String keyword = normalizeIssueQuery(queryString);
@@ -350,6 +364,7 @@ public class MonitorQueryService {
 
     private List<String> issueFingerprints(
             String projectKey, Date since, String environment, String release, String messageQuery) {
+        // 错误指纹把 ClickHouse 原始事件和 MySQL 问题汇总对应起来；最多取 10,000 个，控制查询范围。
         StringBuilder sql = new StringBuilder("SELECT DISTINCT fingerprint FROM monitor.error_event " +
                 "WHERE project_id=? AND event_time>=? AND fingerprint!=''");
         List<Object> args = new ArrayList<>(List.of(projectKey, new Timestamp(since.getTime())));
@@ -389,6 +404,7 @@ public class MonitorQueryService {
     }
 
     private void enrichIssueTriage(Long projectId, List<MonitorIssue> issues, String release) {
+        // 趋势数字不单独存表；这里按错误指纹一次统计最近和之前 24 小时的事件数。
         if (issues.isEmpty()) return;
         Instant now = Instant.now();
         Instant currentStart = now.minus(24, ChronoUnit.HOURS);
@@ -447,6 +463,7 @@ public class MonitorQueryService {
     }
 
     public List<Map<String, Object>> issueEvents(MonitorProject project, MonitorIssue issue, int limit) {
+        // 问题表只保存汇总信息；详情页需要的原始错误样本再按项目和错误指纹回查，并限制返回条数。
         return clickHouse.queryForList(
                 "SELECT event_id,event_time,session_id,user_id,release,environment,page_url,trace_id,payload " +
                         "FROM monitor.error_event WHERE project_id=? AND fingerprint=? ORDER BY event_time DESC LIMIT ?",
@@ -613,6 +630,8 @@ public class MonitorQueryService {
             String tagValue,
             int limit,
             int offset) {
+        // 先从允许查询的事件表中选择，再把字段整理成相同格式合并，供统一事件列表展示。
+        // 服务端限制时间范围和返回条数；筛选值作为数据库参数传入，不直接拼接到 SQL 里。
         int safeHours = Math.max(1, Math.min(24 * 90, hours));
         int safeLimit = Math.max(1, Math.min(500, limit));
         int safeOffset = Math.max(0, Math.min(10000, offset));
@@ -659,6 +678,7 @@ public class MonitorQueryService {
         }
         args.add(safeLimit + 1);
         args.add(safeOffset);
+        // 多查一行只是为了判断后面还有没有数据；返回页面前会把这行去掉。
         List<Map<String, Object>> rows = clickHouse.queryForList(
                 String.join(" UNION ALL ", selects) + " ORDER BY event_time DESC LIMIT ? OFFSET ?",
                 args.toArray()
@@ -989,6 +1009,7 @@ public class MonitorQueryService {
             String userId,
             String tagKey,
             String tagValue) {
+        // 按顺序添加筛选条件和值；JdbcTemplate 会把每个值填进对应的问号位置，不把输入拼成 SQL 代码。
         if (StringUtils.hasText(environment)) { where.append(" AND environment=?"); args.add(environment); }
         if (StringUtils.hasText(release)) { where.append(" AND release=?"); args.add(release); }
         if (StringUtils.hasText(traceId)) {
@@ -1019,6 +1040,7 @@ public class MonitorQueryService {
     }
 
     private void appendExploreExpression(MonitorExploreQueryParser.Node node, StringBuilder sql, List<Object> args) {
+        // 把用户查询拆成条件及 AND/OR 组合，再逐层生成带括号的 SQL，保证“并且/或者”的先后关系正确。
         if (node instanceof MonitorExploreQueryParser.Filter filter) {
             appendExploreFilter(filter.term(), sql, args);
             return;
@@ -1034,6 +1056,7 @@ public class MonitorQueryService {
     }
 
     private void appendExploreFilter(MonitorExploreQueryParser.Term term, StringBuilder sql, List<Object> args) {
+        // 只允许固定字段名，筛选值都通过数据库参数传入；标签名称和值也不直接拼进 SQL。
         String expression = switch (term.field()) {
             case "environment" -> "environment=?";
             case "release" -> "release=?";

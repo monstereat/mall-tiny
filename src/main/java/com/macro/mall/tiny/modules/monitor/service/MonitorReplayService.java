@@ -23,6 +23,10 @@ import java.util.Collection;
 import java.util.Date;
 import java.util.Map;
 
+/**
+ * 保存浏览器回放组件收集的一组页面操作，并在 MySQL 登记供问题详情和会话页面查找的基本信息。
+ * 较大的原始片段放在对象存储；ClickHouse 事件只记录回放编号，查看详情时再读取原文件。
+ */
 @Service
 @RequiredArgsConstructor
 public class MonitorReplayService {
@@ -41,6 +45,7 @@ public class MonitorReplayService {
         Object replayEvents = data == null ? null : data.get("events");
 
         try {
+            // 浏览器回放数据是一组 JSON 事件；先转成字节再压缩，只有文件确实变小时才保存压缩版。
             byte[] json = objectMapper.writeValueAsBytes(replayEvents == null ? data : replayEvents);
             byte[] compressed = gzip(json);
             boolean useCompression = compressed.length < json.length;
@@ -60,6 +65,7 @@ public class MonitorReplayService {
             replay.setEventCount(replayEvents instanceof Collection<?> c ? c.size() : 0);
             replay.setStartTime(new Date(event.getTimestamp()));
             replay.setEndTime(new Date(event.getTimestamp()));
+            // 先排队检查并预留项目空间，再上传文件和写入索引；超过额度时不会执行里面的上传步骤。
             return quotaService.storeIfWithinQuota(replayBucket, project.getProjectKey(), bytes.length, () -> {
                 minioClient.putObject(
                         PutObjectArgs.builder()
@@ -80,6 +86,7 @@ public class MonitorReplayService {
     }
 
     public byte[] load(MonitorReplay replay) {
+        // 根据数据库里的对象路径读取私有文件；旧文件可能没压缩，所以按文件名判断是否需要解压。
         try (InputStream input = minioClient.getObject(
                 GetObjectArgs.builder()
                         .bucket(replayBucket)

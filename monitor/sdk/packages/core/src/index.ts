@@ -156,6 +156,9 @@ function businessProperties(properties: Record<string, unknown>): Record<string,
   return result;
 }
 
+/**
+ * SDK 的统一事件入口：负责补齐公共字段、执行发送前过滤，并将事件放入可选持久化的批量发送队列。
+ */
 export class MonitorClient {
   private readonly queue: QueuedMonitorEvent[] = [];
   private readonly errorListeners = new Set<(input: MonitorEventInput) => void>();
@@ -176,6 +179,7 @@ export class MonitorClient {
   constructor(private readonly options: MonitorClientOptions) {
     this.sessionId = options.sessionId ?? randomId();
     this.userId = options.userId;
+    // 先恢复上次未发送的事件，再记录本次会话，尽量保持队列中的新旧事件顺序。
     this.restoreQueue();
     this.startReleaseHealthSession();
     this.startProfiler();
@@ -212,6 +216,7 @@ export class MonitorClient {
   }
 
   capture(input: MonitorEventInput, traceparent?: string, bypassSampling = false): string | null {
+    // 错误事件不参与通用采样，避免采样配置把故障证据整体丢掉。
     const sampleRate = clampRate(this.options.sampleRate);
     if (!bypassSampling && input.eventType !== 'ERROR' && (sampleRate <= 0 || Math.random() >= sampleRate)) {
       return null;
@@ -238,12 +243,14 @@ export class MonitorClient {
       traceparent: matchingTraceparent(traceparent, input.traceId)
     };
 
+    // beforeSend 和结构校验发生在入队前，持久化队列中保存的是最终要发送的版本。
     const prepared = this.prepareForQueue(event);
     if (!prepared) return null;
     event = prepared;
 
     this.enqueue(event);
     if (input.eventType === 'ERROR') {
+      // Replay 等集成订阅经过发送前处理的错误；集成异常不能反过来影响业务上报。
       for (const listener of this.errorListeners) {
         try {
           listener({ ...input, data: event.data, pageUrl: event.pageUrl });
@@ -406,6 +413,7 @@ export class MonitorClient {
       const batchSize = Math.max(1, Math.min(100, this.options.batchSize ?? 20));
       const endpoint = this.options.endpoint.replace(/\/$/, '') + '/batch';
       while (this.queue.length > 0) {
+        // 先从持久队列取出并保存剩余项；请求失败时会把本批放回队首。
         const events = this.takeBatch(batchSize);
         this.persistQueue();
         const traceparent = events[0].traceparent;
@@ -612,6 +620,7 @@ export class MonitorClient {
   }
 
   private takeBatch(batchSize: number): QueuedMonitorEvent[] {
+    // 一个 HTTP 批次只有一个 traceparent 请求头，因此只合并同一父 Trace 的事件。
     const traceparent = this.queue[0].traceparent;
     const batch: QueuedMonitorEvent[] = [];
     const remaining: QueuedMonitorEvent[] = [];
@@ -667,6 +676,7 @@ export class MonitorClient {
     const eventType = event.eventType;
     const traceparent = event.traceparent;
     try {
+      // beforeSend 可以改内容或丢弃事件，但不能改变事件身份、项目和类型。
       const transformed = this.options.beforeSend ? this.options.beforeSend(event) : event;
       if (!transformed || transformed.eventId !== eventId || transformed.projectId !== this.options.projectId
           || transformed.eventType !== eventType || !transformed.data || typeof transformed.data !== 'object'
@@ -685,6 +695,7 @@ export class MonitorClient {
       if (!raw) return;
       const events = JSON.parse(raw) as QueuedMonitorEvent[];
       if (!Array.isArray(events)) return;
+      // 本地存储可能来自旧版本或被外部修改，恢复时按当前规则重新校验每条事件。
       this.queue.push(...events
         .map(event => this.prepareForQueue(event))
         .filter((event): event is QueuedMonitorEvent => event !== null));

@@ -21,6 +21,10 @@ import java.util.Objects;
 import java.util.Map;
 import java.util.regex.Pattern;
 
+/**
+ * 安排一条事件从 HTTP 接口进入后台处理的顺序：Controller 负责读请求，本类负责验项目、验内容、脱敏、限流和排队。
+ * {@code data} 是一组运行时才知道内容的键值对，所以这里要按事件类型逐项检查；通过后再交给后台消费者处理。
+ */
 @Service
 @RequiredArgsConstructor
 public class MonitorIngestService {
@@ -37,6 +41,7 @@ public class MonitorIngestService {
     private static final int MAX_BUSINESS_PROPERTY_DEPTH = 3;
     private static final ObjectMapper BUSINESS_PROPERTY_MAPPER = new ObjectMapper();
 
+    // final 表示这些依赖创建后不会再更换；Lombok 自动生成构造函数，Spring 启动时会把对应服务传进来。
     private final MonitorProjectService projectService;
     private final MonitorRateLimiter rateLimiter;
     private final MonitorEventProducer producer;
@@ -44,14 +49,18 @@ public class MonitorIngestService {
     private final MonitorEventScrubber eventScrubber;
 
     public void ingest(String ingestKey, MonitorEventEnvelope event) {
+        // 1) 按项目编号查项目并核对请求头里的 Key，同时取回该项目的脱敏设置。
         MonitorProject project = projectService.validateIngestKey(event.getProjectId(), ingestKey);
+        // 2) data 是运行时才解析的 JSON 键值对象，编译器无法检查每个字段；这里按事件类型检查内容和类型。
         validateMetric(event);
+        // 3) 先把敏感信息替换掉，再排队；后面的后台处理、数据库和日志只接触处理后的事件。
         eventScrubber.scrub(event, Boolean.TRUE.equals(project.getScrubEmails()),
                 Boolean.TRUE.equals(project.getScrubCreditCards()),
                 Boolean.TRUE.equals(project.getScrubIpAddresses()),
                 Boolean.TRUE.equals(project.getScrubPhoneNumbers()),
                 Boolean.TRUE.equals(project.getScrubChineseIdNumbers()),
                 MonitorSensitiveFieldNames.fromStorage(project.getCustomSensitiveFields()));
+        // MDC 是“本线程当前日志信息”；Web 线程会重复使用，所以处理结束时要恢复进入方法前的值。
         String previousProject = MDC.get("monitor.project");
         String previousTraceId = MDC.get("monitor.trace_id");
         String previousEnvironment = MDC.get("monitor.environment");
@@ -63,6 +72,7 @@ public class MonitorIngestService {
         setMdc("monitor.environment", event.getEnvironment());
         setMdc("monitor.release", event.getRelease());
         try {
+            // 4) 先检查项目每分钟额度和自定义指标数量上限，再按事件类型把消息送入 Kafka 队列。
             acquire(event.getProjectId(), 1);
             metricCardinalityService.reserve(project.getId(), List.of(event));
             producer.publish(event);
@@ -84,12 +94,15 @@ public class MonitorIngestService {
             return 0;
         }
         String projectId = events.get(0).getProjectId();
+        // 用第一条事件的项目编号核对 Key；下面再确认这一批的其他事件也都属于同一项目。
         MonitorProject project = projectService.validateIngestKey(projectId, ingestKey);
 
+        // 一批只能属于同一个项目，才能安全共用同一个上报 Key 和该项目的额度。
         boolean sameProject = events.stream().allMatch(event -> projectId.equals(event.getProjectId()));
         if (!sameProject) {
             throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "one batch can contain only one project");
         }
+        // 先对整批完成校验和脱敏，再开始逐条发送，避免单纯的格式错误导致前半批已经进入队列。
         events.forEach(this::validateMetric);
         events.forEach(event -> eventScrubber.scrub(event, Boolean.TRUE.equals(project.getScrubEmails()),
                 Boolean.TRUE.equals(project.getScrubCreditCards()),
@@ -105,6 +118,7 @@ public class MonitorIngestService {
         String previousUserId = MDC.get("monitor.user_id");
         String previousTags = MDC.get("monitor.tags");
         MDC.put("monitor.project", projectId);
+        // 一批事件的用户、链路编号、环境和版本可能不同；只有整批相同时才写入这批共用的日志信息。
         MDC.remove("monitor.user_id");
         MDC.remove("monitor.tags");
         String traceId = events.get(0).getTraceId();
@@ -120,9 +134,12 @@ public class MonitorIngestService {
         setMdc("monitor.release", events.stream().allMatch(event -> Objects.equals(release, event.getRelease()))
                 ? release : null);
         try {
+            // 每条事件占用一个额度；指标名称和标签数量先整批检查，然后仍逐条送入 Kafka。
             acquire(projectId, events.size());
+            // 发布每条消息时只把适合写入日志检索条件的字段放进日志上下文。
             metricCardinalityService.reserve(project.getId(), events);
             for (MonitorEventEnvelope event : events) {
+                // 暂存并恢复每条事件自己的日志信息，防止上一条的值串到下一条日志里。
                 String previousTrace = MDC.get("monitor.trace_id");
                 String previousEventEnvironment = MDC.get("monitor.environment");
                 String previousEventRelease = MDC.get("monitor.release");
@@ -163,6 +180,7 @@ public class MonitorIngestService {
         if (StringUtils.hasText(value)) {
             MDC.put(key, value);
         } else {
+            // 没有值时要彻底删除，而不是写空字符串，否则这个复用的线程可能还带着上一次的日志信息。
             MDC.remove(key);
         }
     }
@@ -202,12 +220,14 @@ public class MonitorIngestService {
     }
 
     private void acquire(String projectId, long permits) {
+        // 超过项目额度时返回 HTTP 429（请求过多）；统一异常处理会把它转换成接口响应。
         if (!rateLimiter.tryAcquire(projectId, permits)) {
             throw new ResponseStatusException(HttpStatus.TOO_MANY_REQUESTS, "monitor ingest rate limit exceeded");
         }
     }
 
     private void validateMetric(MonitorEventEnvelope event) {
+        // 根据事件类型进入不同的内容检查；其他通用必填规则已由接口层先检查。
         if (event.getEventType() == MonitorEventType.SPAN) {
             validateSpan(event);
             return;
@@ -225,6 +245,7 @@ public class MonitorIngestService {
         Object name = data.get("name");
         Object metricType = data.get("metricType");
         Object value = data.get("value");
+        // 自定义指标要限制名称、数据类型、数值和标签格式，防止错误数据或标签种类过多。
         if (!(name instanceof String metricName) || !METRIC_NAME.matcher(metricName).matches()) {
             throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "metric name is invalid");
         }
@@ -258,6 +279,7 @@ public class MonitorIngestService {
     }
 
     private void validateBusinessBehavior(MonitorEventEnvelope event) {
+        // BEHAVIOR 既能表示点击/路由行为，也能表示业务分析和页面事件；这里只检查后两类专用字段。
         Map<String, Object> data = event.getData();
         if (data == null) return;
         Object rawCategory = data.get("category");
@@ -270,6 +292,7 @@ public class MonitorIngestService {
     }
 
     private void validateBusinessEvent(Map<String, Object> data) {
+        // 业务事件名必须是小写下划线格式；采样率和自定义属性对象也必须符合约定。
         validateEventName(data.get("event"));
         validateAnalyticsSampleRate(data.get("analyticsSampleRate"));
         Object properties = data.get("properties");
@@ -280,6 +303,7 @@ public class MonitorIngestService {
     }
 
     private void validatePageEvent(Map<String, Object> data) {
+        // 页面事件只接受“页面打开”和“页面停留”；停留时间以毫秒计，且不能超过一天。
         Object rawEvent = data.get("event");
         if (!(rawEvent instanceof String event) || !("page_view".equals(event) || "page_dwell".equals(event))) {
             throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "page event must be page_view or page_dwell");
@@ -332,6 +356,7 @@ public class MonitorIngestService {
     }
 
     private void validateProperties(Object value) {
+        // 限制自定义属性的字段数、JSON 总大小和嵌套层数，避免单条事件过大挤占队列和存储空间。
         if (value == null) return;
         if (!(value instanceof Map<?, ?> properties) || properties.size() > MAX_BUSINESS_PROPERTY_KEYS) {
             throw new ResponseStatusException(HttpStatus.BAD_REQUEST,
@@ -356,6 +381,7 @@ public class MonitorIngestService {
     }
 
     private void validatePropertyValue(Object value, int depth) {
+        // 逐层检查属性里的对象和数组；只允许 JSON 能表达的值，并从最外层开始计算嵌套层数。
         if (depth > MAX_BUSINESS_PROPERTY_DEPTH) {
             throw new ResponseStatusException(HttpStatus.BAD_REQUEST,
                     "business properties nesting depth must be at most 3");
@@ -391,6 +417,7 @@ public class MonitorIngestService {
     }
 
     private void validateSpan(MonitorEventEnvelope event) {
+        // 调用链编号和单次调用编号负责把调用连起来，必须是指定长度、非全零的十六进制字符串。
         if (!validTraceId(event.getTraceId())) {
             throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "span traceId must be a non-zero 32-character hex ID");
         }
@@ -442,6 +469,7 @@ public class MonitorIngestService {
             throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "span statusCode must be an integer from 0 to 599");
         }
 
+        // 统一编号大小写，避免同一条调用链被拆成两条；事件时间改为该次调用的开始时间。
         Map<String, Object> canonicalData = new LinkedHashMap<>(data);
         event.setTraceId(event.getTraceId().toLowerCase(java.util.Locale.ROOT));
         canonicalData.put("spanId", spanId.toLowerCase(java.util.Locale.ROOT));
@@ -461,6 +489,7 @@ public class MonitorIngestService {
     }
 
     private void validateProfile(MonitorEventEnvelope event) {
+        // Profile 每个样本只保存一条调用栈及其权重，避免把整份浏览器原始对象放进事件。
         Map<String, Object> data = event.getData();
         if (data == null || !"collapsed".equals(data.get("format"))) {
             throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "profile format must be collapsed");

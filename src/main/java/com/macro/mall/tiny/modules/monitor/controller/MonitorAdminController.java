@@ -45,6 +45,10 @@ import java.util.List;
 import java.util.Map;
 import java.util.Set;
 
+/**
+ * 管理端的 HTTP 入口：从 URL 读取参数，调用业务服务，再把结果包装成统一的 JSON 响应。
+ * Spring 会把 @PathVariable 对应到 URL 路径段，把 @RequestParam 对应到问号后的查询参数；查数据前先检查项目权限。
+ */
 @RestController
 @RequestMapping("/monitor/admin")
 @RequiredArgsConstructor
@@ -116,6 +120,8 @@ public class MonitorAdminController {
             @RequestParam(defaultValue = "24") int hours,
             @RequestParam(required = false) String environment,
             @RequestParam(required = false) String release) {
+        // requireProject 先确认当前管理员有权读取这个项目；通过后把项目信息交给查询服务。
+        // hours/environment/release 是 URL 查询参数；没传 hours 时，Spring 使用这里声明的 24 小时默认值。
         MonitorProject project = adminService.requireProject(projectKey);
         return CommonResult.success(queryService.dashboard(project, hours, environment, release));
     }
@@ -208,6 +214,8 @@ public class MonitorAdminController {
             @RequestParam(required = false) String tagValue,
             @RequestParam(defaultValue = "100") int limit,
             @RequestParam(defaultValue = "0") int offset) {
+        // 先确认管理员能读这个项目，再检查查询语法、长度、Tag 参数是否成对，以及分页范围。
+        // 入参不合法时由入口返回 HTTP 400；拼查询、访问数据库的工作交给查询服务。
         MonitorProject project = adminService.requireProject(projectKey);
         boolean hasUserFilter = StringUtils.hasText(userId);
         boolean hasTagKey = StringUtils.hasText(tagKey);
@@ -926,6 +934,7 @@ public class MonitorAdminController {
             @RequestParam(required = false) String release,
             @RequestParam(defaultValue = "1") long pageNum,
             @RequestParam(defaultValue = "20") long pageSize) {
+        // false 表示这里只要求读取权限；具体检查管理员是否属于项目、角色是否允许读取，由权限服务完成。
         MonitorProject project = adminService.requireProject(projectKey);
         return CommonResult.success(queryService.traces(project, hours, environment, release, pageNum, pageSize));
     }
@@ -934,6 +943,7 @@ public class MonitorAdminController {
     public CommonResult<List<MonitorTraceSpan>> traceSpans(
             @PathVariable String projectKey,
             @PathVariable String traceId) {
+        // projectKey/traceId 来自 URL 路径；先确认项目可读，再查询这个项目中对应的一组调用记录（Span）。
         MonitorProject project = adminService.requireProject(projectKey);
         return CommonResult.success(queryService.traceSpans(project, traceId));
     }
@@ -949,6 +959,7 @@ public class MonitorAdminController {
             @RequestParam(defaultValue = "lastSeen") String sort,
             @RequestParam(required = false) String query,
             @RequestParam(required = false) String environment) {
+        // Spring 先从 URL 取出列表参数；查询服务再处理时间范围、筛选、排序和分页，并补充趋势数据。
         MonitorProject project = adminService.requireProject(projectKey);
         return CommonResult.success(
                 queryService.issues(project, pageNum, pageSize, status, hours, release, sort, query, environment)
@@ -960,6 +971,7 @@ public class MonitorAdminController {
             @PathVariable String projectKey,
             @PathVariable Long issueId,
             @RequestParam(defaultValue = "20") int eventLimit) {
+        // 问题汇总记录从 MySQL 读取；确认它属于当前项目后，再按错误指纹到 ClickHouse 找有限条原始样本。
         MonitorProject project = adminService.requireProject(projectKey);
         MonitorIssue issue = queryService.issue(project.getId(), issueId);
         Map<String, Object> result = new LinkedHashMap<>();

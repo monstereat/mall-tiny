@@ -25,6 +25,10 @@ import java.util.HexFormat;
 import java.util.List;
 import java.util.concurrent.locks.ReentrantLock;
 
+/**
+ * 记录每个项目已经占用多少会话回放文件空间，并在上传前检查剩余额度。
+ * 进程内的锁处理同一 Server 的并发；MySQL 命名锁让不同 Server 也排队处理同一项目，避免同时判断时都误以为有空间。
+ */
 @Service
 @RequiredArgsConstructor
 public class MonitorReplayQuotaService {
@@ -65,6 +69,7 @@ public class MonitorReplayQuotaService {
 
         ReentrantLock lock = projectLocks[Math.floorMod(31 * bucket.hashCode() + projectKey.hashCode(),
                 projectLocks.length)];
+        // 先用本进程的锁排队；再用数据库共享锁排队，这样部署多个 Server 时也只有一个能更新此项目的用量。
         lock.lock();
         try {
             return withDatabaseProjectLock(bucket, projectKey, connection -> {
@@ -74,10 +79,12 @@ public class MonitorReplayQuotaService {
                             projectKey, currentBytes, incomingBytes, projectQuotaBytes);
                 }
 
+                // 先把本次文件大小计入占用，再执行上传，避免两个同时到达的请求都按旧用量通过检查。
                 reserveUsage(connection, bucket, projectKey, incomingBytes);
                 try {
                     return action.run();
                 } catch (Exception | Error failure) {
+                    // 上传或登记信息失败后重新统计项目已有文件，修正占用数字；文件可能已上传但后续步骤失败。
                     try {
                         setUsage(connection, bucket, projectKey, getProjectObjectBytes(bucket, projectKey));
                     } catch (Exception reconciliationFailure) {

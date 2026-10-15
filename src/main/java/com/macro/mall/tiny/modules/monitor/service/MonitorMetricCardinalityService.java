@@ -23,6 +23,10 @@ import java.util.Map;
 import java.util.TreeMap;
 import java.util.TreeSet;
 
+/**
+ * 限制每个项目能创建多少种自定义指标名和标签值。
+ * 这里说的“种类数”包括不同的指标名、标签名和标签值；若一直增长，数据库要维护的标签组合会越来越多，查询也会变慢。
+ */
 @Service
 @RequiredArgsConstructor
 public class MonitorMetricCardinalityService {
@@ -37,6 +41,7 @@ public class MonitorMetricCardinalityService {
 
     @Transactional
     public void reserve(Long projectId, List<MonitorEventEnvelope> events) {
+        // 先把本批的重复指标合并；TreeMap/TreeSet 会按名称排序，让后面大家按同一顺序加锁，减少互相等待。
         TreeMap<String, TreeMap<String, TreeSet<String>>> dimensions = new TreeMap<>();
         for (MonitorEventEnvelope event : events) {
             if (event.getEventType() != MonitorEventType.METRIC) continue;
@@ -55,6 +60,7 @@ public class MonitorMetricCardinalityService {
         if (dimensions.isEmpty()) return;
 
         Date cutoff = cutoff();
+        // 先锁住项目的计数行；同一项目同时收到请求时，它们会排队更新，避免都读到旧数字而超出上限。
         mapper.ensureProject(projectId);
         Integer metricCount = mapper.lockProject(projectId);
         if (metricCount == null) {
@@ -68,6 +74,7 @@ public class MonitorMetricCardinalityService {
 
         for (Map.Entry<String, TreeMap<String, TreeSet<String>>> metric : dimensions.entrySet()) {
             String metricName = metric.getKey();
+            // ensure... 会尝试创建名称/标签；返回 1 表示这次真的新建，只有新种类才占用配额。
             if (mapper.ensureMetric(projectId, metricName) == 1) {
                 if (metricCount >= MAX_METRICS_PER_PROJECT) {
                     throw quotaExceeded("project metric-name cardinality limit exceeded");
@@ -95,6 +102,7 @@ public class MonitorMetricCardinalityService {
                     mapper.adjustDimensionKeyCount(projectId, metricName, 1);
                 }
 
+                // 锁住这个标签的计数行后再加新值；同一个值重复上报不会重复占配额。
                 MonitorMetricCardinalityDimension scope = mapper.lockDimension(projectId, metricName, dimensionKey);
                 if (scope == null || scope.getDistinctValueCount() == null) {
                     throw new IllegalStateException("metric cardinality dimension scope is missing");
@@ -124,6 +132,7 @@ public class MonitorMetricCardinalityService {
     @Scheduled(fixedDelayString = "${monitor.metrics.cardinality-cleanup-interval-ms:3600000}")
     @Transactional
     public void cleanupExpiredDimensions() {
+        // Spring 会定期清理 90 天没用过的指标和标签，并同步修正保存的数量。
         Date cutoff = cutoff();
         List<Long> expiredProjects = mapper.findProjectsWithExpiredMetrics(cutoff, CLEANUP_BATCH_SIZE);
         for (Long projectId : expiredProjects) {

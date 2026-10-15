@@ -12,6 +12,10 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Optional;
 
+/**
+ * 读取 Source Map v3 文件，把压缩后的 JavaScript 位置换回原始源码的位置。
+ * 文件里的位置编号从 0 开始，浏览器显示从 1 开始；查到映射后会转换成浏览器使用的行列号。
+ */
 @Service
 @RequiredArgsConstructor
 public class SourceMapV3Resolver {
@@ -24,6 +28,7 @@ public class SourceMapV3Resolver {
             byte[] sourceMapBytes,
             int generatedLine,
             int generatedColumn) {
+        // 调用方传来的行列号与浏览器一致、从 1 开始；Source Map 文件内部编号从 0 开始。
         if (generatedLine <= 0 || generatedColumn <= 0) {
             return Optional.empty();
         }
@@ -53,6 +58,7 @@ public class SourceMapV3Resolver {
             int originalColumn = 0;
             int nameIndex = 0;
 
+            // 文件只记录每个位置相对上个位置的变化量；换新行时列号重新开始，其余记录继续累计。
             for (int lineIndex = 0; lineIndex < lines.length && lineIndex <= targetLine; lineIndex++) {
                 int generatedColumnState = 0;
                 SourceMapResolvedPosition candidate = null;
@@ -72,9 +78,7 @@ public class SourceMapV3Resolver {
 
                         generatedColumnState += values[0];
 
-                        // A single-field segment marks an unmapped range. It must clear a prior
-                        // candidate so positions after this segment are not attributed to an
-                        // earlier generated range.
+                        // 有些位置明确表示“这里没有源码对应关系”；清掉之前找到的位置，避免把旧结果套到这里。
                         if (lineIndex == targetLine && generatedColumnState <= targetColumn && values.length == 1) {
                             candidate = null;
                         } else if (values.length >= 4) {
@@ -101,6 +105,7 @@ public class SourceMapV3Resolver {
                         }
 
                         if (lineIndex == targetLine && generatedColumnState > targetColumn) {
+                            // 文件里的列号按从小到大排列；超过目标列后，本行后面的记录都不会更接近目标。
                             break;
                         }
                     }
@@ -166,6 +171,7 @@ public class SourceMapV3Resolver {
     }
 
     private int[] decodeSegment(String segment) {
+        // 每段用 Base64 字符压缩保存整数；字符中的 5 位表示数值，另 1 位表示这个数是否还没结束。
         List<Integer> values = new ArrayList<>();
         int index = 0;
 
@@ -189,6 +195,7 @@ public class SourceMapV3Resolver {
                 shift += 5;
             } while (continuation);
 
+            // 解出的整数最低位表示正负，其余位还原实际数值。
             boolean negative = (result & 1) == 1;
             int value = result >> 1;
             values.add(negative ? -value : value);

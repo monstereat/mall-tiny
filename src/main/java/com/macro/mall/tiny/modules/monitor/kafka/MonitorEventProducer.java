@@ -9,6 +9,10 @@ import org.springframework.beans.factory.annotation.Value;
 import org.springframework.kafka.core.KafkaTemplate;
 import org.springframework.stereotype.Component;
 
+/**
+ * 把事件交给 Kafka 队列的出口：先把 Java 对象转成 JSON，再按事件类型选择对应队列。
+ * Spring 会提供 KafkaTemplate；send 发起异步发送后就会返回，后台消费者负责后续保存。
+ */
 @Component
 @RequiredArgsConstructor
 public class MonitorEventProducer {
@@ -39,6 +43,7 @@ public class MonitorEventProducer {
 
     public void publish(MonitorEventEnvelope event) {
         try {
+            // send 不会等数据库保存完成；同一项目使用同一个 key，Kafka 会把它们放到同一队列分区，尽量保持先后顺序。
             kafkaTemplate.send(resolveTopic(event.getEventType()), event.getProjectId(), objectMapper.writeValueAsString(event));
         } catch (JsonProcessingException e) {
             throw new IllegalArgumentException("monitor event serialization failed", e);
@@ -46,6 +51,7 @@ public class MonitorEventProducer {
     }
 
     private String resolveTopic(MonitorEventType type) {
+        // 队列名称只从事件类型的固定对应表中选，不能让请求内容决定消息发到哪里。
         return switch (type) {
             case ERROR -> errorTopic;
             case PERFORMANCE -> performanceTopic;

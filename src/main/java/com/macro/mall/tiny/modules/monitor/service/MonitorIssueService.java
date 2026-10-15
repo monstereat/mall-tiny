@@ -22,6 +22,10 @@ import java.util.Map;
 import java.util.List;
 import java.util.UUID;
 
+/**
+ * 把单条错误事件合并到 MySQL 的问题汇总（Issue）里。
+ * 用“项目编号 + 错误指纹”找到对应问题，更新发生次数、时间和影响用户数；新问题或已解决问题再次出现时触发通知。
+ */
 @Service
 @RequiredArgsConstructor
 public class MonitorIssueService {
@@ -43,6 +47,7 @@ public class MonitorIssueService {
     private final StringRedisTemplate redisTemplate;
 
     public void aggregate(MonitorProject project, MonitorEventEnvelope event, String fingerprint) {
+        // 第一层按事件编号去重，避免 Kafka 重发同一条错误后把次数和用户数再加一遍。
         String processedKey = "monitor:issue:aggregated:" + event.getEventId();
         Boolean first = redisTemplate.opsForValue()
                 .setIfAbsent(processedKey, "1", ISSUE_EVENT_DEDUP_TTL);
@@ -50,6 +55,7 @@ public class MonitorIssueService {
             return;
         }
 
+        // 第二层按问题指纹加锁：不同错误可能同时到达；同一个问题的新建/恢复判断要一个接一个处理。
         String lockKey = "monitor:issue:transition:" + project.getId() + ":" + fingerprint;
         String lockOwner = UUID.randomUUID().toString();
         Boolean locked;
@@ -65,6 +71,7 @@ public class MonitorIssueService {
         }
 
         try {
+            // 先读取更新前状态，判断这是新问题还是已解决后复发；随后用 upsert 一次完成新增或更新汇总行。
             MonitorIssue existing = issueMapper.selectOne(Wrappers.<MonitorIssue>lambdaQuery()
                     .eq(MonitorIssue::getProjectId, project.getId())
                     .eq(MonitorIssue::getFingerprint, fingerprint)
@@ -78,6 +85,7 @@ public class MonitorIssueService {
             boolean retryingRegressionNotification = existing != null
                     && sameEventTime(existing.getRegressedAt(), event.getTimestamp());
             long affectedUsers = updateAffectedUsers(project.getId(), fingerprint, event.getUserId());
+            // upsert 的意思是“没有就新增，有就更新”；它会更新首次/最近发生时间等汇总信息。
             issueMapper.upsert(
                     project.getId(),
                     fingerprint,
@@ -92,6 +100,7 @@ public class MonitorIssueService {
                 notifyIssueRules(project, event, fingerprint, ISSUE_REGRESSION_METRIC, "Issue regressed");
             }
         } catch (RuntimeException ex) {
+            // 出错时删除事件编号的去重记录，再把异常交还 Kafka；这样重试时不会被当成已处理。
             redisTemplate.delete(processedKey);
             throw ex;
         } finally {
@@ -100,11 +109,13 @@ public class MonitorIssueService {
     }
 
     void releaseTransitionLock(String lockKey, String lockOwner) {
+        // Lua 脚本一次完成“确认锁还是自己持有，再删除”；避免删掉其他线程后来拿到的新锁。
         redisTemplate.execute(RELEASE_ISSUE_LOCK, List.of(lockKey), lockOwner);
     }
 
     private void notifyIssueRules(MonitorProject project, MonitorEventEnvelope event, String fingerprint,
                                   String metric, String eventLabel) {
+        // 按规则逐条检查通知；在静默期内就跳过，已有记录但消息没发出去时只补发那条消息。
         for (MonitorAlertRule rule : alertRuleMapper.selectList(Wrappers.<MonitorAlertRule>lambdaQuery()
                 .eq(MonitorAlertRule::getProjectId, project.getId())
                 .eq(MonitorAlertRule::getEnabled, 1)
@@ -156,6 +167,7 @@ public class MonitorIssueService {
     private long updateAffectedUsers(Long projectId, String fingerprint, String userId) {
         String key = "monitor:issue:users:" + projectId + ":" + fingerprint;
         if (StringUtils.hasText(userId)) {
+            // HyperLogLog 是 Redis 的省空间计数器：可以估算不同 userId 的数量，但不能列出用户，也不是精确计数。
             redisTemplate.opsForHyperLogLog().add(key, userId);
             redisTemplate.expire(key, USER_CARDINALITY_TTL);
         }

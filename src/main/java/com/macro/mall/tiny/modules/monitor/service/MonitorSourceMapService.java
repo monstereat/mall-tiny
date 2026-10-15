@@ -27,6 +27,9 @@ import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 
+/**
+ * 管理每个版本的私有源码映射文件（Source Map）：上传时保存文件和索引，报错查询时把压缩代码位置还原成原始源码位置。
+ */
 @Service
 @RequiredArgsConstructor
 public class MonitorSourceMapService {
@@ -49,10 +52,12 @@ public class MonitorSourceMapService {
             String environment,
             String bundleFile,
             MultipartFile file) {
+        // 版本上传密钥供 CI 发布流程使用，与浏览器事件上报密钥分开。
         MonitorProject project = projectService.validateReleaseKey(projectKey, releaseKey);
         MonitorRelease release = releaseService.require(project.getId(), version, environment);
 
         try {
+            // file 是 Spring 读到的上传文件；文件放在私有对象存储，数据库只记查找它所需的信息。
             byte[] bytes = file.getBytes();
             bucketService.ensureBucket(sourceMapBucket);
             String objectKey = objectKey(projectKey, release, bundleFile);
@@ -87,6 +92,7 @@ public class MonitorSourceMapService {
                 sourceMapMapper.updateById(sourceMap);
             }
 
+            // 文件和数据库索引都保存成功后，才把这个版本标记为“已上传源码映射文件”。
             releaseService.markSourceMapUploaded(release);
             return sourceMap;
         } catch (Exception e) {
@@ -124,9 +130,11 @@ public class MonitorSourceMapService {
             String fallbackFile,
             Integer fallbackLine,
             Integer fallbackColumn) {
+        // 先把浏览器调用堆栈拆成一条条代码位置，再逐条查映射；查不到时保留原来的压缩文件位置。
         MonitorRelease release = releaseService.require(project.getId(), version, environment);
         List<SourceMapStackTraceParser.Frame> frames =
                 stackTraceParser.parse(stack, fallbackFile, fallbackLine, fallbackColumn);
+        // 多条调用位置可能指向同一个压缩文件；本次请求缓存查找结果和文件内容，避免重复读存储。
         Map<String, Optional<MonitorSourceMap>> sourceMaps = new HashMap<>();
         Map<String, byte[]> sourceMapContents = new HashMap<>();
         List<SourceMapStackFrame> results = new ArrayList<>(frames.size());
@@ -166,6 +174,7 @@ public class MonitorSourceMapService {
             MonitorSourceMap sourceMap,
             Map<String, byte[]> sourceMapContents,
             SourceMapStackTraceParser.Frame frame) {
+        // 首次遇到这个对象路径时才下载，后续相同路径直接使用本次请求已经读到的文件。
         byte[] contents = sourceMapContents.computeIfAbsent(sourceMap.getObjectKey(), key -> readSourceMap(sourceMap));
         return resolver.resolve(contents, frame.line(), frame.column()).orElse(null);
     }
@@ -194,6 +203,7 @@ public class MonitorSourceMapService {
             String bundleFile,
             int line,
             int column) {
+        // 先限定项目、版本和环境，再按压缩文件名查映射索引，避免拿错版本的文件来还原位置。
         MonitorRelease release = releaseService.require(project.getId(), version, environment);
         MonitorSourceMap sourceMap = sourceMapMapper.selectOne(
                 Wrappers.<MonitorSourceMap>lambdaQuery()

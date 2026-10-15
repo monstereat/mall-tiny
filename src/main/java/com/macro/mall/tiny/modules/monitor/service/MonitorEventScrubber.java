@@ -15,6 +15,11 @@ import java.net.UnknownHostException;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
+/**
+ * 在事件进入队列前替换密钥和个人信息，保证后续保存、查询时读到的是处理后的内容。
+ * 会检查页面地址、设备信息和事件数据，包括里面继续嵌套的对象与数组；顶层用户/会话编号仍保留供现有统计使用。
+ * 登录凭据始终过滤；邮箱、银行卡号、IP、手机号和身份证是否过滤由项目设置决定。
+ */
 @Component
 public class MonitorEventScrubber {
 
@@ -62,6 +67,8 @@ public class MonitorEventScrubber {
     public void scrub(MonitorEventEnvelope event, boolean scrubEmails, boolean scrubCreditCards,
                       boolean scrubIpAddresses, boolean scrubPhoneNumbers, boolean scrubChineseIdNumbers,
                       List<String> customSensitiveFields) {
+        // 先统一项目自定义敏感字段的写法，再处理事件里可能包含业务内容的几个字段。
+        // 逐层检查页面地址、设备信息和事件数据；顶层身份/会话编号仍供统计使用。
         Set<String> customKeys = MonitorSensitiveFieldNames.normalizedSet(customSensitiveFields);
         event.setPageUrl(sanitize(event.getPageUrl(), scrubEmails, scrubCreditCards, scrubIpAddresses,
                 scrubPhoneNumbers, scrubChineseIdNumbers));
@@ -76,6 +83,7 @@ public class MonitorEventScrubber {
                                          boolean scrubPhoneNumbers, boolean scrubChineseIdNumbers, Set<String> customKeys) {
         if (source == null || source.isEmpty()) return source;
         Map<String, Object> scrubbed = new LinkedHashMap<>();
+        // 创建一份新的对象而不是修改原对象；字段名敏感时整项替换，否则继续检查字段里面的内容。
         source.forEach((key, value) -> scrubbed.put(key,
                 isSensitiveKey(key, customKeys) ? FILTERED
                         : scrubValue(value, scrubEmails, scrubCreditCards, scrubIpAddresses,
@@ -85,6 +93,7 @@ public class MonitorEventScrubber {
 
     private Object scrubValue(Object value, boolean scrubEmails, boolean scrubCreditCards, boolean scrubIpAddresses,
                               boolean scrubPhoneNumbers, boolean scrubChineseIdNumbers, Set<String> customKeys) {
+        // JSON 值可能是文字/数字、对象或数组；继续检查对象和数组内部，确保深层属性也使用同一套脱敏规则。
         if (value instanceof String text) return sanitize(text, scrubEmails, scrubCreditCards, scrubIpAddresses,
                 scrubPhoneNumbers, scrubChineseIdNumbers);
         if (scrubCreditCards && value instanceof Number number) {
@@ -113,6 +122,7 @@ public class MonitorEventScrubber {
     private String sanitize(String value, boolean scrubEmails, boolean scrubCreditCards, boolean scrubIpAddresses,
                             boolean scrubPhoneNumbers, boolean scrubChineseIdNumbers) {
         if (value == null || value.isEmpty()) return value;
+        // 登录密钥和认证内容始终替换；邮箱、卡号、IP、手机号和身份证按项目开关决定是否替换。
         String sanitized = URL_USER_INFO.matcher(value).replaceAll("$1[Filtered]@");
         sanitized = SENSITIVE_QUERY.matcher(sanitized).replaceAll("$1" + FILTERED);
         sanitized = AUTH_ASSIGNMENT.matcher(sanitized).replaceAll("$1" + FILTERED);
@@ -127,6 +137,7 @@ public class MonitorEventScrubber {
     }
 
     private String scrubIpAddresses(String value) {
+        // 先找像 IP 的文字，再检查每段数字是否在有效范围，或交给 Java 识别 IPv6，减少误把普通数字当成地址。
         Matcher ipv4Matcher = IPV4_CANDIDATE.matcher(value);
         StringBuffer ipv4Result = new StringBuffer();
         while (ipv4Matcher.find()) {
@@ -166,6 +177,7 @@ public class MonitorEventScrubber {
     }
 
     private String scrubCardNumbers(String value) {
+        // 先找像卡号的数字串，去掉空格/短横线后检查长度和校验规则，避免误伤普通数字。
         Matcher matcher = CARD_CANDIDATE.matcher(value);
         StringBuffer result = new StringBuffer();
         while (matcher.find()) {
@@ -178,6 +190,7 @@ public class MonitorEventScrubber {
     }
 
     private boolean passesLuhn(String digits) {
+        // 按银行卡号常见校验方法计算：从右向左处理数字，最终总和能被 10 整除才认为像有效卡号。
         int sum = 0;
         boolean doubleDigit = false;
         for (int index = digits.length() - 1; index >= 0; index--) {
@@ -197,6 +210,7 @@ public class MonitorEventScrubber {
     }
 
     private boolean isSensitiveKey(String key, Set<String> customKeys) {
+        // 比较字段名时忽略大小写、下划线和短横线差异，所以 access_token 和 access-token 会按同一个名字处理。
         String normalized = normalizeKey(key);
         return SENSITIVE_KEYS.contains(normalized) || customKeys.contains(normalized);
     }
