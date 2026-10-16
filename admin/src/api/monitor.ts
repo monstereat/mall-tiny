@@ -254,6 +254,38 @@ export interface MonitorDataScrubbingSettings {
   canModify: boolean;
 }
 
+export interface MonitorDeadLetterRecordView {
+  sourceTopic: string;
+  deadLetterTopic: string;
+  deadLetterPartition: number;
+  deadLetterOffset: number;
+  deadLetterTimestamp: number;
+  originalPartition: number;
+  originalOffset: number;
+  eventId: string | null;
+  eventType: 'ERROR' | 'PERFORMANCE' | 'BEHAVIOR' | 'REPLAY' | 'METRIC' | 'PROFILE' | 'SPAN';
+  failureClass: string | null;
+  failureMessage: string | null;
+  payload: string;
+  replayed: boolean;
+  replayTargetPartition?: number | null;
+  replayTargetOffset?: number | null;
+}
+
+export interface MonitorDeadLetterSummaryView {
+  sourceTopic: string;
+  deadLetterTopic: string;
+  deadLetterPartition: number;
+  deadLetterOffset: number;
+  deadLetterTimestamp: number;
+  originalPartition: number;
+  originalOffset: number;
+  eventId: string | null;
+  eventType: 'ERROR' | 'PERFORMANCE' | 'BEHAVIOR' | 'REPLAY' | 'METRIC' | 'PROFILE' | 'SPAN';
+  failureClass: string | null;
+  failureMessage: string | null;
+}
+
 export interface PerformanceData {
   summary: Array<{ metric: string; avgValue: number; p75: number; p95: number; samples: number }>;
   trend: Array<{ bucket: string; metric: string; value: number }>;
@@ -632,6 +664,16 @@ export const monitorApi = {
     request<MonitorDataDeletionJob>(projectUrl(projectKey, `/data-deletion/${jobId}`)),
   retryDataDeletion: (projectKey: string, jobId: number) =>
     request<MonitorDataDeletionJob>(projectUrl(projectKey, `/data-deletion/${jobId}/retry`), { method: 'POST' }),
+  listDeadLetters: (projectKey: string, sourceTopic: string, limit = 100) =>
+    request<MonitorDeadLetterSummaryView[]>(projectUrl(projectKey,
+      `/kafka/dlq/${encodeURIComponent(sourceTopic)}/records?limit=${limit}`)),
+  inspectDeadLetter: (projectKey: string, sourceTopic: string, partition: number, offset: number) =>
+    request<MonitorDeadLetterRecordView>(projectUrl(projectKey,
+      `/kafka/dlq/${encodeURIComponent(sourceTopic)}/partitions/${partition}/offsets/${offset}`)),
+  replayDeadLetter: (projectKey: string, payload: { sourceTopic: string; partition: number; offset: number }) =>
+    request<MonitorDeadLetterRecordView>(projectUrl(projectKey, '/kafka/dlq/replay'), {
+      method: 'POST', body: JSON.stringify(payload)
+    }),
   tenants: () => request<MonitorTenant[]>('/monitor/admin/tenants'),
   createTenant: (payload: { name: string; tenantKey: string }) =>
     request<MonitorTenant>('/monitor/admin/tenants', { method: 'POST', body: JSON.stringify(payload) }),

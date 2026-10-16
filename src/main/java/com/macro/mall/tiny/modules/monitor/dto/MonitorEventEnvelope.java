@@ -42,6 +42,7 @@ public class MonitorEventEnvelope {
     private String environment = "production";
     private String pageUrl;
     private String sdkVersion;
+    /** 事件产生时确定的业务 Trace ID；不使用延迟上报请求自己的 Trace ID 代替。 */
     private String traceId;
     /** 浏览器和屏幕尺寸等设备信息；作为 JSON 对象保存，入库前会检查其中的嵌套内容并脱敏。 */
     private Map<String, Object> device = new HashMap<>();

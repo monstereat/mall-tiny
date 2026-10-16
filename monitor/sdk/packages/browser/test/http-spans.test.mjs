@@ -4,14 +4,16 @@ import { init } from '../dist/index.js';
 
 const descriptors = new Map();
 const monitors = [];
+let browserListeners;
 
 function setGlobal(name, value) {
   if (!descriptors.has(name)) descriptors.set(name, Object.getOwnPropertyDescriptor(globalThis, name));
   Object.defineProperty(globalThis, name, { configurable: true, writable: true, value });
 }
 
-function setup(fetchHandler, tracePropagation = 'all') {
+function setup(fetchHandler, tracePropagation = 'all', browserOptions = {}) {
   const listeners = new Map();
+  browserListeners = listeners;
   const location = {
     href: 'https://page-user:page-password@app.example.test/current?session=page-secret#page-fragment',
     origin: 'https://app.example.test'
@@ -51,7 +53,8 @@ function setup(fetchHandler, tracePropagation = 'all') {
     capturePerformance: false,
     captureWhiteScreen: false,
     captureClicks: false,
-    tracePropagation
+    tracePropagation,
+    ...browserOptions
   });
   monitors.push(monitor);
   return monitor;
@@ -64,6 +67,7 @@ afterEach(async () => {
     else delete globalThis[name];
   }
   descriptors.clear();
+  browserListeners = undefined;
 });
 
 test('fetch emits a successful span with a generated trace context and a sanitized URL', async () => {
@@ -121,6 +125,21 @@ test('fetch keeps 4xx spans ok, keeps 5xx error events, and emits one error span
   assert.equal(spans.at(-1).data.status, 'error');
   assert.equal(spans.at(-1).data.statusCode, undefined);
   assert.ok(monitor.client.queue.some(item => item.eventType === 'ERROR' && item.data.message === 'network failed'));
+});
+
+test('unhandled JavaScript errors do not inherit the most recent API trace ID', async () => {
+  const monitor = setup(async () => new Response(null, { status: 200 }), 'all', { captureErrors: true });
+  await window.fetch('https://api.example.test/previous-request');
+  const previousApiTraceId = monitor.client.queue.find(item => item.eventType === 'SPAN').traceId;
+
+  browserListeners.get('unhandledrejection')({ reason: new Error('unhandled application error') });
+  const error = monitor.client.queue.find(item => item.eventType === 'ERROR'
+    && item.data.mechanism === 'unhandledrejection');
+
+  assert.ok(previousApiTraceId);
+  assert.ok(error);
+  assert.equal(error.traceId, undefined);
+  assert.equal(error.data.traceId, undefined);
 });
 
 test('fetch derives a child span from an upstream traceparent and preserves Request body and headers', async () => {

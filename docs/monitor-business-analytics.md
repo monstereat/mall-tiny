@@ -28,6 +28,28 @@ monitor.client.identify('business-user-id');
 // 退出登录：monitor.client.identify(undefined);
 ```
 
+### 把一段业务流程串起来
+
+同一个支付流程会产生多条业务事件。开始时生成一次 Trace ID，然后在这段流程的每次 `track()` 调用中复用它：
+
+```ts
+const paymentTraceId = monitor.client.createTraceId();
+
+monitor.client.track('payment_started', { amount: 100, currency: 'CNY' }, {
+  traceId: paymentTraceId
+});
+monitor.client.track('discount_applied', { discount: 90.1, rule: 'coupon' }, {
+  traceId: paymentTraceId
+});
+monitor.client.track('payment_succeeded', { amount: 9.9, currency: 'CNY' }, {
+  traceId: paymentTraceId
+});
+```
+
+之后在管理后台 Explore 的 Trace ID 筛选中输入这个编号，就能查看每条事件的属性并对照原金额、优惠和实付金额；Trace 页面则展示事件数量、时间范围和关联 Span。`createTraceId()` 生成的是非全零的 32 位十六进制 W3C Trace ID；若业务后端已经生成了同格式的 Trace ID，也可以直接传入。`traceparent` 是可选项，只有已有对应 W3C 上下文、且它的 Trace ID 与 `traceId` 相同时才传。
+
+没有明确来源的全局 JavaScript 错误不会再借用最近一次 API 请求的 Trace ID。服务端也不会把延迟上报请求的 Trace ID 填进事件；HTTP 接收和 Kafka 消费仍有各自的技术 Trace。这样事件 Trace 表示业务事件本身的关联编号，技术 Trace 表示数据如何被接收和处理。
+
 - `track(event, properties, options?)`：独立业务事件。名称使用小写 ASCII snake_case，最多 64 字符；属性最多 32 键、深度 3、16 KiB，字符串最多 1,024 字符，数字必须有限。非法输入返回 `null`，不打断业务。
 - `page({ url?, name?, referrer?, properties? })`：手动记录页面访问，返回 `pageViewId`。已启用自动页面采集时，通常不需要重复调用；在切换用户后可显式记录新身份下的页面上下文。
 - `identify(userId?)`：设置或清除用户标识，不上传用户画像。优先使用业务内部标识。
@@ -52,7 +74,7 @@ monitor.client.identify('business-user-id');
 
 业务采样独立于普通性能采样，默认 100%。设置低于 1 的 `analyticsSampleRate` 或 `track` 的 `options.sampleRate` 后，已收到的抽样业务事件和抽样页面访问会计入排除提示，不混入精确统计，也不按采样率估算真实数量。100% 采样仍不保证浏览器上报完全不丢；业务成功以服务端确认为准。
 
-页面与事件排行各显示前 100，截断提示不影响全量总览。Demo 支持构建变量 `VITE_MONITOR_ENDPOINT` 指定接收端（默认开发端口 8080）；本地部署栈使用 8081。Demo 中点击“开启业务分析演示”，即可体验页面采集、注册入口点击和用户识别。底层复用现有 BEHAVIOR/Kafka/ClickHouse 链路，不新增数据库 schema。
+页面与事件排行各显示前 100，截断提示不影响全量总览。Demo 支持构建变量 `VITE_MONITOR_ENDPOINT` 指定接收端（默认业务端口 8080）；本地部署栈的业务接口同样使用 8080，8081 仅用于健康检查。Demo 中点击“开启业务分析演示”，即可体验页面采集、注册入口点击和用户识别。底层复用现有 BEHAVIOR/Kafka/ClickHouse 链路，不新增数据库 schema。
 
 ## 性能与白屏改进
 
@@ -74,4 +96,4 @@ node --test packages/core/test/*.test.mjs packages/browser/test/*.test.mjs
 
 根目录执行 `python3 infra/clickhouse/tests/analytics-storage-acceptance.py`，会使用最新编译的 Java 查询服务和真实 ClickHouse，数据源替换为只读内联合成表；不读取业务数据、不落业务表、不运行登录或浏览器 E2E。先运行包含 `MonitorPerformanceSamplesTest` 的 Docker Maven 测试以生成 classpath。
 
-本地部署栈的 Demo 构建示例：`VITE_MONITOR_ENDPOINT=http://localhost:8081/api/v1/envelope pnpm --filter monitor-demo build`（在 `monitor/sdk` 执行）。Demo 源码变化后，若需验证错误源码还原，应重新上传与该构建一致的 Release/SourceMap；这次业务分析构建未代替 SourceMap 发布流程。
+本地部署栈的 Demo 构建示例：`VITE_MONITOR_ENDPOINT=http://localhost:8080/api/v1/envelope pnpm --filter monitor-demo build`（在 `monitor/sdk` 执行）。Demo 源码变化后，若需验证错误源码还原，应重新上传与该构建一致的 Release/SourceMap；这次业务分析构建未代替 SourceMap 发布流程。

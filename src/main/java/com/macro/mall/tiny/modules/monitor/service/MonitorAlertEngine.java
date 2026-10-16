@@ -45,6 +45,7 @@ public class MonitorAlertEngine {
     public void evaluate(MonitorProject project, MonitorEventEnvelope event, String fingerprint) {
         // 每条事件处理时会调用这里，只检查当前项目启用的规则，不扫描所有项目。
         // 日志类规则使用另一种查询方式，问题新建/复发通知也有独立流程，不在这里重复处理。
+        // cd 查询规则
         List<MonitorAlertRule> rules = ruleMapper.selectList(
                 Wrappers.<MonitorAlertRule>lambdaQuery()
                         .eq(MonitorAlertRule::getProjectId, project.getId())

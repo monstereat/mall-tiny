@@ -94,11 +94,6 @@ function isIngestUrl(url: string, endpoint: string): boolean {
   return url.startsWith(endpoint.replace(/\/$/, ''));
 }
 
-function newTraceId(): string {
-  return [...crypto.getRandomValues(new Uint8Array(16))]
-    .map(value => value.toString(16).padStart(2, '0')).join('');
-}
-
 function parseTraceparent(value: string | null): { traceId: string; spanId: string } | undefined {
   const match = value?.trim().match(/^00-([0-9a-f]{32})-([0-9a-f]{16})-[0-9a-f]{2}$/i);
   if (!match || /^0+$/.test(match[1]) || /^0+$/.test(match[2])) return undefined;
@@ -197,7 +192,6 @@ export function init(options: BrowserMonitorOptions): BrowserMonitor {
   const observers: PerformanceObserver[] = [];
   const ingestPrefix = options.endpoint.replace(/\/$/, '');
   let destroyed = false;
-  let lastTraceId: string | undefined;
   let currentPageUrl = sanitizeRouteUrl(location.href);
   let pageViewId: string | undefined;
   let visibleSince: number | undefined;
@@ -249,7 +243,6 @@ export function init(options: BrowserMonitorOptions): BrowserMonitor {
       if (event instanceof ErrorEvent && event.error) {
         client.capture({
           eventType: 'ERROR',
-          traceId: lastTraceId,
           data: {
             name: event.error.name ?? 'Error',
             message: event.message,
@@ -259,7 +252,6 @@ export function init(options: BrowserMonitorOptions): BrowserMonitor {
             file: event.filename,
             line: event.lineno,
             column: event.colno,
-            traceId: lastTraceId,
             breadcrumbs: breadcrumbSnapshot()
           }
         });
@@ -288,14 +280,12 @@ export function init(options: BrowserMonitorOptions): BrowserMonitor {
       const reason = event.reason;
       client.capture({
         eventType: 'ERROR',
-        traceId: lastTraceId,
         data: {
           name: reason instanceof Error ? reason.name : 'UnhandledRejection',
           message: reason instanceof Error ? reason.message : text(reason),
           stack: reason instanceof Error ? reason.stack : undefined,
           mechanism: 'unhandledrejection',
           unhandled: true,
-          traceId: lastTraceId,
           breadcrumbs: breadcrumbSnapshot()
         }
       });
@@ -402,10 +392,9 @@ export function init(options: BrowserMonitorOptions): BrowserMonitor {
       const propagateTrace = canPropagateTrace(url, options.tracePropagation);
       // 先解析调用方的 Trace；是否向目标请求写入子 Span 头由目标域策略控制。
       const inheritedParent = parseTraceparent(existingParent);
-      const traceId = inheritedParent?.traceId ?? newTraceId();
+      const traceId = inheritedParent?.traceId ?? client.createTraceId();
       const spanId = newSpanId();
       const parentSpanId = inheritedParent?.spanId;
-      lastTraceId = traceId;
       if (inheritedParent && propagateTrace) {
         requestHeaders.set('traceparent', newTraceparent(traceId, spanId));
       } else if (propagateTrace && !hasExistingParent) {
@@ -539,10 +528,9 @@ export function init(options: BrowserMonitorOptions): BrowserMonitor {
       const hasExistingParent = suppliedTraceparent.has(this);
       const propagateTrace = canPropagateTrace(item.url, options.tracePropagation);
       const inheritedParent = parseTraceparent(existingParent ?? null);
-      item.traceId = inheritedParent?.traceId ?? newTraceId();
+      item.traceId = inheritedParent?.traceId ?? client.createTraceId();
       item.parentSpanId = inheritedParent?.spanId;
       item.spanId = newSpanId();
-      lastTraceId = item.traceId;
       if (inheritedParent && propagateTrace) {
         originalSetRequestHeader.call(this, 'traceparent', newTraceparent(item.traceId!, item.spanId));
       } else if (!hasExistingParent && propagateTrace) {

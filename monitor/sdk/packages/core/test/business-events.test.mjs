@@ -7,8 +7,13 @@ const originalFetch = globalThis.fetch;
 const originalStorage = Object.getOwnPropertyDescriptor(globalThis, 'localStorage');
 const originalRandom = Math.random;
 const batches = [];
+const batchHeaders = [];
 function client(options = {}) {
-  globalThis.fetch = async (_url, init) => { batches.push(JSON.parse(init.body)); return { ok: true }; };
+  globalThis.fetch = async (_url, init) => {
+    batches.push(JSON.parse(init.body));
+    batchHeaders.push(init.headers);
+    return { ok: true };
+  };
   const value = new MonitorClient({ endpoint: 'https://monitor.example/ingest', projectId: 'project',
     ingestKey: 'synthetic-key', flushInterval: 0, batchSize: 100, persistQueue: false,
     releaseHealth: false, ...options });
@@ -18,6 +23,7 @@ function client(options = {}) {
 afterEach(async () => {
   await Promise.all(clients.splice(0).map(value => value.close()));
   batches.length = 0;
+  batchHeaders.length = 0;
   globalThis.fetch = originalFetch;
   Math.random = originalRandom;
   if (originalStorage) Object.defineProperty(globalThis, 'localStorage', originalStorage);
@@ -36,6 +42,33 @@ test('business events use independent sampling and filter credentials before que
   assert.equal(event.pageUrl, 'https://app.example/register');
   assert.deepEqual(event.data, { category: 'business', event: 'register_success',
     properties: { source: 'campaign', nested: { token: '[Filtered]' } }, analyticsSampleRate: 1 });
+});
+
+test('business events can share an explicit W3C trace ID across the buffered batch', async () => {
+  const value = client();
+  const traceId = value.createTraceId();
+  assert.match(traceId, /^[0-9a-f]{32}$/);
+  assert.notEqual(traceId, '0'.repeat(32));
+
+  assert.ok(value.track('payment_started', { amount: 100 }, { traceId }));
+  assert.ok(value.track('discount_applied', { discount: 90.1 }, { traceId: traceId.toUpperCase() }));
+  assert.ok(value.track('payment_succeeded', { amount: 9.9 }, {
+    traceparent: `00-${traceId}-1234567890abcdef-01`
+  }));
+  await value.flush();
+
+  assert.deepEqual(batches.flatMap(batch => batch.events).map(event => event.traceId), [traceId, traceId, traceId]);
+  assert.equal(batchHeaders[1].traceparent, `00-${traceId}-1234567890abcdef-01`);
+});
+
+test('business events reject malformed or mismatched trace contexts without queuing', () => {
+  const value = client();
+  assert.equal(value.track('payment_started', {}, { traceId: 'order-123' }), null);
+  assert.equal(value.track('payment_started', {}, {
+    traceId: '11111111111111111111111111111111',
+    traceparent: '00-22222222222222222222222222222222-1234567890abcdef-01'
+  }), null);
+  assert.equal(value.queue.length, 0);
 });
 
 test('page and visible dwell correlate without resampling and preserve the original identity', async () => {

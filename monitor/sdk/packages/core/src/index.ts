@@ -35,6 +35,10 @@ export interface MonitorClientOptions {
 export interface MonitorTrackOptions {
   pageUrl?: string;
   sampleRate?: number;
+  /** 复用这个 W3C Trace ID，把同一业务流程的多条事件串起来。 */
+  traceId?: string;
+  /** 可选的 W3C traceparent；必须与 traceId 属于同一条 Trace。 */
+  traceparent?: string;
 }
 
 export interface MonitorPageOptions {
@@ -101,6 +105,33 @@ function randomId(): string {
     return crypto.randomUUID();
   }
   return `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+}
+
+function randomTraceId(): string {
+  const bytes = new Uint8Array(16);
+  if (globalThis.crypto?.getRandomValues) {
+    globalThis.crypto.getRandomValues(bytes);
+  } else {
+    // 仅在没有 Web Crypto 的旧环境兜底；Trace ID 只是关联编号，不是安全凭据。
+    for (let index = 0; index < bytes.length; index += 1) {
+      bytes[index] = Math.floor(Math.random() * 256);
+    }
+  }
+  if (bytes.every(value => value === 0)) bytes[bytes.length - 1] = 1;
+  return [...bytes].map(value => value.toString(16).padStart(2, '0')).join('');
+}
+
+function normalizeTraceId(value: string | undefined): string | undefined {
+  const traceId = value?.trim().toLowerCase();
+  return traceId && /^[0-9a-f]{32}$/.test(traceId) && !/^0+$/.test(traceId)
+    ? traceId
+    : undefined;
+}
+
+function traceIdFromTraceparent(value: string | undefined): string | undefined {
+  const match = value?.trim().match(/^00-([0-9a-f]{32})-([0-9a-f]{16})-[0-9a-f]{2}$/i);
+  if (!match || /^0+$/.test(match[2])) return undefined;
+  return normalizeTraceId(match[1]);
 }
 
 function clampRate(value: number | undefined): number {
@@ -305,11 +336,20 @@ export class MonitorClient {
       if (event.length > 64 || !/^[a-z][a-z0-9]*(?:_[a-z0-9]+)*$/.test(event)) return null;
       const rate = clampRate(options.sampleRate ?? this.options.analyticsSampleRate);
       if (!Number.isFinite(rate) || rate <= 0 || Math.random() >= rate) return null;
+      const explicitTraceId = options.traceId === undefined
+        ? undefined
+        : normalizeTraceId(options.traceId);
+      const parentTraceId = traceIdFromTraceparent(options.traceparent);
+      if (options.traceId !== undefined && !explicitTraceId) return null;
+      if (options.traceparent !== undefined && !parentTraceId) return null;
+      if (explicitTraceId && parentTraceId && explicitTraceId !== parentTraceId) return null;
+      const traceId = explicitTraceId ?? parentTraceId;
       return this.capture({
         eventType: 'BEHAVIOR',
         pageUrl: analyticsUrl(options.pageUrl ?? (typeof location === 'undefined' ? '/' : location.href)),
+        traceId,
         data: { category: 'business', event, properties: businessProperties(properties), analyticsSampleRate: rate }
-      }, undefined, true);
+      }, options.traceparent, true);
     } catch {
       return null;
     }
@@ -480,6 +520,11 @@ export class MonitorClient {
 
   getSessionId(): string {
     return this.sessionId;
+  }
+
+  /** 创建一个可供同一业务流程的多条事件复用的 W3C Trace ID。 */
+  createTraceId(): string {
+    return randomTraceId();
   }
 
   private enqueue(event: MonitorEventEnvelope): void {

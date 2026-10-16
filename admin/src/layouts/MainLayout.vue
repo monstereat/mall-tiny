@@ -27,6 +27,7 @@ function logout() {
         <el-menu-item index="/projects">Projects</el-menu-item>
         <el-menu-item index="/organization">Organization</el-menu-item>
         <el-menu-item index="/data-governance">Data Governance</el-menu-item>
+        <el-menu-item index="/dead-letters">Kafka 死信</el-menu-item>
         <el-menu-item index="/performance">Performance</el-menu-item>
         <el-menu-item index="/business">业务分析</el-menu-item>
         <el-menu-item index="/metrics">Metrics</el-menu-item>

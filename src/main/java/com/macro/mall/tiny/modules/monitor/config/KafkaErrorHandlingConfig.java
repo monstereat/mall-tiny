@@ -13,6 +13,7 @@ public class KafkaErrorHandlingConfig {
 
     @Bean
     public DefaultErrorHandler monitorKafkaErrorHandler(KafkaTemplate<String, String> kafkaTemplate) {
+        // cd 配置 Kafka 错误处理策略， 进行死信
         DeadLetterPublishingRecoverer recoverer = new DeadLetterPublishingRecoverer(
                 kafkaTemplate,
                 (record, exception) -> new TopicPartition(record.topic() + ".dlq", record.partition())

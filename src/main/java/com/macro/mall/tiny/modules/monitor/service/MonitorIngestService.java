@@ -54,6 +54,7 @@ public class MonitorIngestService {
         // 2) data 是运行时才解析的 JSON 键值对象，编译器无法检查每个字段；这里按事件类型检查内容和类型。
         validateMetric(event);
         // 3) 先把敏感信息替换掉，再排队；后面的后台处理、数据库和日志只接触处理后的事件。
+        // cd：这里可以扩展成数据清洗层
         eventScrubber.scrub(event, Boolean.TRUE.equals(project.getScrubEmails()),
                 Boolean.TRUE.equals(project.getScrubCreditCards()),
                 Boolean.TRUE.equals(project.getScrubIpAddresses()),
@@ -110,7 +111,7 @@ public class MonitorIngestService {
                 Boolean.TRUE.equals(project.getScrubPhoneNumbers()),
                 Boolean.TRUE.equals(project.getScrubChineseIdNumbers()),
                 MonitorSensitiveFieldNames.fromStorage(project.getCustomSensitiveFields())));
-
+        // cd： 保存日志信息
         String previousProject = MDC.get("monitor.project");
         String previousTraceId = MDC.get("monitor.trace_id");
         String previousEnvironment = MDC.get("monitor.environment");
@@ -119,6 +120,7 @@ public class MonitorIngestService {
         String previousTags = MDC.get("monitor.tags");
         MDC.put("monitor.project", projectId);
         // 一批事件的用户、链路编号、环境和版本可能不同；只有整批相同时才写入这批共用的日志信息。
+        // cd：避免之前事件的日志信息串到这批事件的日志里
         MDC.remove("monitor.user_id");
         MDC.remove("monitor.tags");
         String traceId = events.get(0).getTraceId();
@@ -129,6 +131,7 @@ public class MonitorIngestService {
         }
         String environment = events.get(0).getEnvironment();
         String release = events.get(0).getRelease();
+        // cd：环境相同写日志
         setMdc("monitor.environment", events.stream().allMatch(event -> Objects.equals(environment, event.getEnvironment()))
                 ? environment : null);
         setMdc("monitor.release", events.stream().allMatch(event -> Objects.equals(release, event.getRelease()))
@@ -149,10 +152,12 @@ public class MonitorIngestService {
                 try {
                     producer.publish(event);
                     if (indexedEvent) {
+                        // cd 事件放日志，方便检索
                         setEventTags(event);
                         setMdc("monitor.trace_id", event.getTraceId());
                         setMdc("monitor.environment", event.getEnvironment());
                         setMdc("monitor.release", event.getRelease());
+                        // cd 写日志方便检索
                         setUserIdMdc(event.getUserId());
                         LOGGER.info("accepted monitor telemetry event");
                     }

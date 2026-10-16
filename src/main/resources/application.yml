@@ -42,6 +42,8 @@ spring:
       matching-strategy: ant_path_matcher
   kafka:
     bootstrap-servers: ${KAFKA_BOOTSTRAP_SERVERS:localhost:9092}
+    admin:
+      modify-topic-configs: true
     template:
       observation-enabled: true
     producer:
@@ -111,6 +113,12 @@ monitor:
       replay: monitor-replay-v1
       metric: monitor-metric-v1
       profile: monitor-profile-v1
+      span: monitor-span-v1
+    dlq:
+      metrics-refresh-ms: ${MONITOR_KAFKA_DLQ_METRICS_REFRESH_MS:30000}
+      partitions: ${MONITOR_KAFKA_DLQ_PARTITIONS:1}
+      replication-factor: ${MONITOR_KAFKA_DLQ_REPLICATION_FACTOR:1}
+      retention-ms: ${MONITOR_KAFKA_DLQ_RETENTION_MS:2592000000}
   clickhouse:
     url: ${CLICKHOUSE_JDBC_URL:jdbc:clickhouse://localhost:8123/monitor}
     username: ${CLICKHOUSE_USERNAME:default}

@@ -1,0 +1,29 @@
+groups:
+  - name: monitor-kafka-dead-letter
+    rules:
+      - alert: MonitorKafkaDeadLetterBacklog
+        expr: monitor_kafka_dlq_records > 0
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: A monitor Kafka dead-letter topic has unprocessed records
+          description: "Dead-letter topic {{ $labels.topic }} has {{ $value }} record(s) waiting for investigation."
+
+      - alert: MonitorKafkaDeadLetterOldestRecord
+        expr: monitor_kafka_dlq_oldest_message_age_seconds > 900
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: A monitor Kafka dead-letter record has been waiting too long
+          description: "The oldest record in {{ $labels.topic }} has been waiting for more than 15 minutes."
+
+      - alert: MonitorKafkaDeadLetterMetricsUnavailable
+        expr: monitor_kafka_dlq_metrics_up == 0
+        for: 2m
+        labels:
+          severity: warning
+        annotations:
+          summary: Monitor Kafka dead-letter metrics cannot be refreshed
+          description: The application could not read Kafka dead-letter topic metadata during its latest refresh.

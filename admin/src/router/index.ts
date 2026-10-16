@@ -15,6 +15,7 @@ const router = createRouter({
         { path: 'projects', component: () => import('../views/Projects.vue') },
         { path: 'organization', component: () => import('../views/Organization.vue') },
         { path: 'data-governance', component: () => import('../views/DataGovernance.vue') },
+        { path: 'dead-letters', component: () => import('../views/DeadLetters.vue') },
         { path: 'performance', component: () => import('../views/Performance.vue') },
         { path: 'business', component: () => import('../views/Business.vue') },
         { path: 'metrics', component: () => import('../views/Metrics.vue') },
