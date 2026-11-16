@@ -150,6 +150,7 @@ SourceMap v3 / Base64 VLQ
 Breadcrumb
   ↓
 Session Replay
+
 ```
 
 SourceMap 不公开到 CDN，由 CI 上传到 S3 兼容私有桶（RustFS）。

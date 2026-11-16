@@ -1,0 +1,213 @@
+{
+  "main": {
+    "id": "3ed88bfc19679a6a",
+    "type": "split",
+    "children": [
+      {
+        "id": "adc3638cdab00c61",
+        "type": "tabs",
+        "children": [
+          {
+            "id": "3dfd8cfbd96648ce",
+            "type": "leaf",
+            "state": {
+              "type": "markdown",
+              "state": {
+                "file": "Agent_%E4%B8%83%E5%A4%A7%E6%A8%A1%E5%9D%97_%E4%B8%BB%E6%B5%81%E6%96%B9%E6%A1%88%E4%B8%8E%E6%BA%90%E7%A0%81%E5%88%86%E6%9E%90_%E5%AE%8C%E6%95%B4%E7%89%88.md",
+                "mode": "source",
+                "source": false
+              },
+              "icon": "lucide-file",
+              "title": "Agent_%E4%B8%83%E5%A4%A7%E6%A8%A1%E5%9D%97_%E4%B8%BB%E6%B5%81%E6%96%B9%E6%A1%88%E4%B8%8E%E6%BA%90%E7%A0%81%E5%88%86%E6%9E%90_%E5%AE%8C%E6%95%B4%E7%89%88"
+            }
+          }
+        ]
+      }
+    ],
+    "direction": "vertical"
+  },
+  "left": {
+    "id": "0d18080a2f19f20e",
+    "type": "split",
+    "children": [
+      {
+        "id": "d2783e10f80e48c4",
+        "type": "tabs",
+        "children": [
+          {
+            "id": "19e7e7d3832c525d",
+            "type": "leaf",
+            "state": {
+              "type": "file-explorer",
+              "state": {
+                "sortOrder": "alphabetical",
+                "autoReveal": false,
+                "showSearch": false,
+                "searchQuery": ""
+              },
+              "icon": "lucide-folder-closed",
+              "title": "文件列表"
+            }
+          },
+          {
+            "id": "d65b995c04d450a7",
+            "type": "leaf",
+            "state": {
+              "type": "search",
+              "state": {
+                "query": "",
+                "matchingCase": false,
+                "explainSearch": false,
+                "collapseAll": false,
+                "extraContext": false,
+                "sortOrder": "alphabetical"
+              },
+              "icon": "lucide-search",
+              "title": "搜索"
+            }
+          },
+          {
+            "id": "3e7e86c3c24114cd",
+            "type": "leaf",
+            "state": {
+              "type": "bookmarks",
+              "state": {
+                "showSearch": false,
+                "searchQuery": ""
+              },
+              "icon": "lucide-bookmark",
+              "title": "书签"
+            }
+          }
+        ]
+      }
+    ],
+    "direction": "horizontal",
+    "width": 300
+  },
+  "right": {
+    "id": "21943fa7ed73d310",
+    "type": "split",
+    "children": [
+      {
+        "id": "2037c3248dd40f1e",
+        "type": "tabs",
+        "children": [
+          {
+            "id": "5a127140d4587108",
+            "type": "leaf",
+            "state": {
+              "type": "backlink",
+              "state": {
+                "file": "README.md",
+                "collapseAll": false,
+                "extraContext": false,
+                "sortOrder": "alphabetical",
+                "showSearch": false,
+                "searchQuery": "",
+                "backlinkCollapsed": false,
+                "unlinkedCollapsed": true
+              },
+              "icon": "links-coming-in",
+              "title": "反向链接"
+            }
+          },
+          {
+            "id": "23d03e33d40ddb9f",
+            "type": "leaf",
+            "state": {
+              "type": "outgoing-link",
+              "state": {
+                "file": "README.md",
+                "linksCollapsed": false,
+                "unlinkedCollapsed": true
+              },
+              "icon": "links-going-out",
+              "title": "出链"
+            }
+          },
+          {
+            "id": "bdaca7665ead5907",
+            "type": "leaf",
+            "state": {
+              "type": "tag",
+              "state": {
+                "sortOrder": "frequency",
+                "useHierarchy": true,
+                "showSearch": false,
+                "searchQuery": ""
+              },
+              "icon": "lucide-tags",
+              "title": "标签"
+            }
+          },
+          {
+            "id": "2981e1b70b4d3d23",
+            "type": "leaf",
+            "state": {
+              "type": "all-properties",
+              "state": {
+                "sortOrder": "frequency",
+                "showSearch": false,
+                "searchQuery": ""
+              },
+              "icon": "lucide-archive",
+              "title": "添加笔记属性"
+            }
+          },
+          {
+            "id": "248cf8787dc64df7",
+            "type": "leaf",
+            "state": {
+              "type": "outline",
+              "state": {
+                "file": "README.md",
+                "followCursor": false,
+                "showSearch": false,
+                "searchQuery": ""
+              },
+              "icon": "lucide-list",
+              "title": "大纲"
+            }
+          }
+        ]
+      }
+    ],
+    "direction": "horizontal",
+    "width": 300,
+    "collapsed": true
+  },
+  "left-ribbon": {
+    "hiddenItems": {
+      "switcher:打开快速切换": false,
+      "graph:查看关系图谱": false,
+      "canvas:新建白板": false,
+      "daily-notes:打开/创建今天的日记": false,
+      "templates:插入模板": false,
+      "command-palette:打开命令面板": false,
+      "bases:新建数据库": false
+    }
+  },
+  "active": "3dfd8cfbd96648ce",
+  "lastOpenFiles": [
+    "AI_Agent七大模块_快速学习与方案选型手册.md",
+    "Agent_%E4%B8%83%E5%A4%A7%E6%A8%A1%E5%9D%97_%E4%B8%BB%E6%B5%81%E6%96%B9%E6%A1%88%E4%B8%8E%E6%BA%90%E7%A0%81%E5%88%86%E6%9E%90_%E5%AE%8C%E6%95%B4%E7%89%88.md",
+    "Agent_七大模块_主流方案与源码分析_完整版.md",
+    "README.md",
+    "target/classes/com/macro/mall/tiny/modules/monitor/service/MonitorDeadLetterService$ReplayStatus.class",
+    "admin/dist/assets/Uptime-DI0YAnwV.js",
+    "admin/dist/assets/Crons-DRXl8A1T.js",
+    "admin/dist/assets/Alerts-CMFrDKnp.js",
+    "admin/dist/assets/Replays-BZwP0QCr.js",
+    "admin/dist/assets/Releases-DoZO6MBw.js",
+    "admin/dist/assets/Traces-QCPPIz8F.js",
+    "admin/dist/assets/Logs-BRpKyW6Z.js",
+    "admin/dist/assets/IssueDetail-DHgpblfw.js",
+    "admin/dist/assets/Issues-BZIpH5Q6.js",
+    "specs/001-kafka-dlq-operations/verify.md",
+    "docs/monitor-kafka-dlq.md",
+    "specs/001-kafka-dlq-operations/tasks.md",
+    "specs/001-kafka-dlq-operations/spec.md",
+    "specs/001-kafka-dlq-operations/plan.md"
+  ]
+}
